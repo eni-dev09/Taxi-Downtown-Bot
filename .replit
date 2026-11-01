@@ -34,3 +34,6 @@ timeoutMs = 180000
 [[ports]]
 localPort = 8000
 externalPort = 80
+
+[deployment]
+run = ["python", "-u", "bot.py"]
