@@ -11,6 +11,12 @@ from typing import Any
 
 
 DEFAULT_DB_PATH = Path(__file__).parent / "data" / "taxi_downtown.sqlite3"
+DEFAULT_TICKET_CATEGORIES = {
+    "recrutement": 1463497154575466622,
+    "support": 1508808019536904233,
+    "signalement": 1508808019536904233,
+    "partenariat": 1508807957779841175,
+}
 
 
 def resolve_db_path() -> Path:
@@ -64,6 +70,10 @@ class TaxiStore:
                     driver_role_id INTEGER,
                     log_channel_id INTEGER,
                     webhook_channel_id INTEGER,
+                    ticket_category_recrutement_id INTEGER DEFAULT 1463497154575466622,
+                    ticket_category_support_id INTEGER DEFAULT 1508808019536904233,
+                    ticket_category_signalement_id INTEGER DEFAULT 1508808019536904233,
+                    ticket_category_partenariat_id INTEGER DEFAULT 1508807957779841175,
                     weekly_quota_hours REAL NOT NULL DEFAULT 10
                 );
                 CREATE TABLE IF NOT EXISTS employees (
@@ -153,6 +163,15 @@ class TaxiStore:
             }
             if "reminded_at" not in break_columns:
                 conn.execute("ALTER TABLE service_breaks ADD COLUMN reminded_at TEXT")
+            settings_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(guild_settings)")
+            }
+            for kind, category_id in DEFAULT_TICKET_CATEGORIES.items():
+                column = f"ticket_category_{kind}_id"
+                if column not in settings_columns:
+                    conn.execute(
+                        f"ALTER TABLE guild_settings ADD COLUMN {column} INTEGER DEFAULT {category_id}"
+                    )
             self._migrate_extra_plates(conn)
 
     @staticmethod
@@ -194,6 +213,7 @@ class TaxiStore:
                 "driver_role_id": None,
                 "log_channel_id": None,
                 "webhook_channel_id": None,
+                **{f"ticket_category_{kind}_id": category_id for kind, category_id in DEFAULT_TICKET_CATEGORIES.items()},
                 "weekly_quota_hours": 10.0,
             }
         return dict(row)
@@ -204,6 +224,10 @@ class TaxiStore:
             "driver_role_id",
             "log_channel_id",
             "webhook_channel_id",
+            "ticket_category_recrutement_id",
+            "ticket_category_support_id",
+            "ticket_category_signalement_id",
+            "ticket_category_partenariat_id",
         }
         updates = {key: value for key, value in values.items() if key in allowed}
         if not updates:
