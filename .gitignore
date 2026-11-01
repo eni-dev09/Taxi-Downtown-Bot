@@ -1,0 +1,7 @@
+/fleet_records.sqlite3
+/fleet_records.sqlite3-shm
+/fleet_records.sqlite3-wal
+/data/
+/node_modules/
+/__pycache__/
+*.py[cod]
