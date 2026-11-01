@@ -9,7 +9,7 @@ Bot de gestion de l'entreprise de taxi Taxi Downtown : service, courses, primes 
 3. Un administrateur lance `/config` : un panel privé avec des menus (rôle Direction, rôle Chauffeur, salon des journaux, salon webhook) et deux boutons pour publier les panels dans le salon courant.
 4. Panels publics (boutons persistants, valables après redémarrage) :
    - **PDS-FDS** : Prise de service, Fin de service, Pause, Reprise (remplace `/service`). Le panel affiche en direct les employés en service (🟢) et en pause (🟡) ; il se met à jour à chaque action. Seul le dernier panel publié est actualisé.
-   - **Tickets** : Candidature, Question / Support, Signalement / Plainte. Chaque ticket crée un salon privé (demandeur + Direction) dans la catégorie du salon du panel ; bouton « Fermer le ticket » pour le demandeur ou la Direction. Le bot a besoin de **Gérer les salons**.
+   - **Tickets** : Candidature, Question / Support, Signalement / Plainte et Partenariat. Chaque type possède sa catégorie de destination (par défaut : RECRUTEMENT, DIRECTION, DIRECTION et PARTENARIAT). Dans `/config` → **Catégories tickets**, les administrateurs peuvent choisir les catégories Discord pour chaque type. Les nouveaux salons sont privés (demandeur + Direction) ; un seul ticket ouvert par membre. Le bot a besoin de **Gérer les salons**.
 5. Données : `data/taxi_downtown.sqlite3`. Au premier démarrage, les anciennes « plaques supplémentaires » sont fusionnées dans la flotte (une seule fois).
 
 ## Règles appliquées
