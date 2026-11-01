@@ -167,6 +167,36 @@ class TaxiStoreTests(unittest.TestCase):
         self.assertFalse(self.store.mark_break_reminded(overdue[0]["break_id"]))
         self.assertEqual(self.store.overdue_breaks(now - timedelta(minutes=30)), [])
 
+    def test_ticket_categories_have_server_defaults_and_are_configurable(self):
+        settings = self.store.get_settings(123)
+        self.assertEqual(settings["ticket_category_recrutement_id"], 1463497154575466622)
+        self.assertEqual(settings["ticket_category_support_id"], 1508808019536904233)
+        self.assertEqual(settings["ticket_category_signalement_id"], 1508808019536904233)
+        self.assertEqual(settings["ticket_category_partenariat_id"], 1508807957779841175)
+
+        updated = self.store.set_settings(123, ticket_category_support_id=987654321)
+        self.assertEqual(updated["ticket_category_support_id"], 987654321)
+        self.assertEqual(updated["ticket_category_recrutement_id"], 1463497154575466622)
+
+    def test_existing_settings_table_is_migrated_without_losing_roles(self):
+        legacy_path = Path(self.temp_dir.name) / "legacy-settings.sqlite3"
+        conn = sqlite3.connect(legacy_path)
+        conn.execute(
+            "CREATE TABLE guild_settings (guild_id INTEGER PRIMARY KEY, "
+            "direction_role_id INTEGER, driver_role_id INTEGER, log_channel_id INTEGER, "
+            "webhook_channel_id INTEGER, weekly_quota_hours REAL NOT NULL DEFAULT 10)"
+        )
+        conn.execute(
+            "INSERT INTO guild_settings (guild_id, direction_role_id) VALUES (77, 1234)"
+        )
+        conn.commit()
+        conn.close()
+
+        migrated = TaxiStore(legacy_path).get_settings(77)
+        self.assertEqual(migrated["direction_role_id"], 1234)
+        self.assertEqual(migrated["ticket_category_recrutement_id"], 1463497154575466622)
+        self.assertEqual(migrated["ticket_category_partenariat_id"], 1508807957779841175)
+
     def test_database_connections_are_closed_after_use(self):
         with self.store._connect() as conn:
             connection = conn
