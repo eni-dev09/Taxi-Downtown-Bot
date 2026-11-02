@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hmac
 import json
 import os
@@ -308,13 +309,15 @@ class TaxiBot(commands.Bot):
         self.heartbeat_task: asyncio.Task[None] | None = None
 
     async def setup_hook(self) -> None:
+        # Le port d'abord : s'il est pris, une autre instance tourne déjà. On s'arrête
+        # AVANT de toucher à la base (la récupération ci-dessous clôt les services ouverts).
+        await self.start_webhook_server()
         self.interrupted_services = STORE.recover_interrupted_services()
         self.heartbeat_task = asyncio.create_task(self.heartbeat_loop())
         for view in (PdsView(), TicketPanelView(), TicketCloseView()):
             self.add_view(view)
         synced = await self.tree.sync()
         print(f"{len(synced)} commandes slash synchronisées.")
-        await self.start_webhook_server()
 
     async def heartbeat_loop(self) -> None:
         while not self.is_closed():
@@ -333,7 +336,18 @@ class TaxiBot(commands.Bot):
         await self.webhook_runner.setup()
         port = int(os.getenv("WEBHOOK_PORT", "8000"))
         site = web.TCPSite(self.webhook_runner, "0.0.0.0", port)
-        await site.start()
+        try:
+            await site.start()
+        except OSError as exc:
+            await self.webhook_runner.cleanup()
+            self.webhook_runner = None
+            if exc.errno == errno.EADDRINUSE:
+                raise SystemExit(
+                    f"❌ Le port {port} est déjà utilisé : une autre instance du bot tourne "
+                    "(bouton Run, Shell ou Deployment). Arrête-la avant de relancer, sinon "
+                    "le bot répondrait en double."
+                ) from None
+            raise
         if shared_secret:
             print(f"Webhook in-game prêt sur le port {port}, chemin /webhook/ingame.")
         else:
@@ -971,13 +985,6 @@ TICKET_KINDS = {
     "recrutement": ("Candidature", "📋", discord.ButtonStyle.success),
     "support": ("Question / Support", "❓", discord.ButtonStyle.primary),
     "signalement": ("Signalement / Plainte", "🚨", discord.ButtonStyle.danger),
-    "partenariat": ("Partenariat", "🤝", discord.ButtonStyle.secondary),
-}
-TICKET_CATEGORY_LABELS = {
-    "recrutement": "RECRUTEMENT",
-    "support": "DIRECTION",
-    "signalement": "DIRECTION",
-    "partenariat": "PARTENARIAT",
 }
 
 
@@ -1031,18 +1038,7 @@ class TicketModal(discord.ui.Modal):
                 attach_files=True, manage_messages=True,
             )
         slug = re.sub(r"[^a-z0-9-]", "", member.name.lower().replace(" ", "-")) or str(member.id)
-        category_id = STORE.get_settings(guild.id).get(f"ticket_category_{self.kind}_id")
-        category = guild.get_channel(int(category_id)) if category_id else None
-        category_warning = None
-        if category is not None and not isinstance(category, discord.CategoryChannel):
-            category = None
-        if category is None:
-            category = getattr(interaction.channel, "category", None)
-            category_warning = (
-                f"\n⚠️ La catégorie **{TICKET_CATEGORY_LABELS[self.kind]}** n'est pas configurée "
-                "ou n'existe plus. Le ticket a été placé dans la catégorie du panel. "
-                "Un administrateur doit vérifier `/config`."
-            )
+        category = getattr(interaction.channel, "category", None)
         try:
             channel = await guild.create_text_channel(
                 f"{self.kind}-{slug}"[:90],
@@ -1071,9 +1067,7 @@ class TicketModal(discord.ui.Modal):
             view=TicketCloseView(),
             allowed_mentions=discord.AllowedMentions(users=[member], roles=True),
         )
-        await interaction.followup.send(
-            f"🎫 Ticket créé : {channel.mention}" + (category_warning or ""), ephemeral=True
-        )
+        await interaction.followup.send(f"🎫 Ticket créé : {channel.mention}", ephemeral=True)
         await log_event(
             guild, "🎫 Ticket ouvert", f"{member.mention} — {label} — {channel.mention}"
         )
@@ -1141,8 +1135,7 @@ def ticket_embed() -> discord.Embed:
             "avec la direction.\n\n"
             "📋 **Candidature** — rejoindre l'entreprise\n"
             "❓ **Question / Support** — règles, tarifs, véhicules, planning\n"
-            "🚨 **Signalement / Plainte** — problème avec un membre ou un client\n"
-            "🤝 **Partenariat** — proposer ou gérer un partenariat\n\n"
+            "🚨 **Signalement / Plainte** — problème avec un membre ou un client\n\n"
             "Un seul ticket ouvert à la fois."
         ),
         color=discord.Color.gold(),
@@ -1170,101 +1163,10 @@ def config_embed(guild: discord.Guild) -> discord.Embed:
     embed.add_field(name="Chauffeurs", value=role("driver_role_id", "non configuré"))
     embed.add_field(name="Salon des journaux", value=channel("log_channel_id"))
     embed.add_field(name="Salon webhook in-game", value=channel("webhook_channel_id"))
-    categories = []
-    for kind, (label, _emoji, _style) in TICKET_KINDS.items():
-        category_id = settings.get(f"ticket_category_{kind}_id")
-        category = guild.get_channel(int(category_id)) if category_id else None
-        destination = category.mention if isinstance(category, discord.CategoryChannel) else "⚠️ à configurer"
-        categories.append(f"**{label}** → {destination}")
-    embed.add_field(name="Où vont les tickets ?", value="\n".join(categories), inline=False)
     embed.set_footer(
-        text="Sélectionne les menus pour modifier. Les boutons publient les panels dans ce salon."
+        text="Sélectionne dans les menus pour modifier. Les boutons publient un panel dans ce salon."
     )
     return embed
-
-
-def ticket_category_config_embed(guild: discord.Guild) -> discord.Embed:
-    settings = STORE.get_settings(guild.id)
-    embed = discord.Embed(
-        title="🎫 Destinations des tickets",
-        description=(
-            "Choisis la catégorie Discord dans laquelle chaque type de ticket sera créé. "
-            "Les changements s'appliquent aux prochains tickets."
-        ),
-        color=discord.Color.gold(),
-    )
-    for kind, (label, _emoji, _style) in TICKET_KINDS.items():
-        category_id = settings.get(f"ticket_category_{kind}_id")
-        category = guild.get_channel(int(category_id)) if category_id else None
-        value = category.mention if isinstance(category, discord.CategoryChannel) else "Non configurée"
-        embed.add_field(name=label, value=value, inline=True)
-    return embed
-
-
-class TicketCategoryConfigView(discord.ui.View):
-    def __init__(self) -> None:
-        super().__init__(timeout=900)
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if is_admin(interaction):
-            return True
-        await interaction.response.send_message(
-            "Seuls les administrateurs peuvent modifier les catégories.", ephemeral=True
-        )
-        return False
-
-    async def _save_category(
-        self, interaction: discord.Interaction, kind: str, select: discord.ui.ChannelSelect
-    ) -> None:
-        if not interaction.guild:
-            return
-        category = select.values[0]
-        if not isinstance(category, discord.CategoryChannel):
-            await interaction.response.send_message(
-                "Sélectionne une catégorie Discord valide.", ephemeral=True
-            )
-            return
-        STORE.set_settings(
-            interaction.guild.id, **{f"ticket_category_{kind}_id": category.id}
-        )
-        await interaction.response.edit_message(
-            embed=ticket_category_config_embed(interaction.guild), view=self
-        )
-
-    @discord.ui.select(
-        cls=discord.ui.ChannelSelect, placeholder="Catégorie des candidatures",
-        channel_types=[discord.ChannelType.category], min_values=1, max_values=1, row=0,
-    )
-    async def recruitment(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect) -> None:
-        await self._save_category(interaction, "recrutement", select)
-
-    @discord.ui.select(
-        cls=discord.ui.ChannelSelect, placeholder="Catégorie du support",
-        channel_types=[discord.ChannelType.category], min_values=1, max_values=1, row=1,
-    )
-    async def support(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect) -> None:
-        await self._save_category(interaction, "support", select)
-
-    @discord.ui.select(
-        cls=discord.ui.ChannelSelect, placeholder="Catégorie des signalements",
-        channel_types=[discord.ChannelType.category], min_values=1, max_values=1, row=2,
-    )
-    async def reports(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect) -> None:
-        await self._save_category(interaction, "signalement", select)
-
-    @discord.ui.select(
-        cls=discord.ui.ChannelSelect, placeholder="Catégorie des partenariats",
-        channel_types=[discord.ChannelType.category], min_values=1, max_values=1, row=3,
-    )
-    async def partnerships(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect) -> None:
-        await self._save_category(interaction, "partenariat", select)
-
-    @discord.ui.button(label="Retour à la configuration", emoji="↩️", row=4)
-    async def back(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        assert interaction.guild
-        await interaction.response.edit_message(
-            embed=config_embed(interaction.guild), view=ConfigView()
-        )
 
 
 class ConfigView(discord.ui.View):
@@ -1325,14 +1227,6 @@ class ConfigView(discord.ui.View):
         if pds and interaction.guild:
             STORE.set_pds_panel(interaction.guild.id, message.channel.id, message.id)
         await interaction.response.send_message("✅ Panel publié dans ce salon.", ephemeral=True)
-
-    @discord.ui.button(label="Catégories tickets", emoji="📂", style=discord.ButtonStyle.secondary, row=4)
-    async def ticket_categories(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        assert interaction.guild
-        await interaction.response.edit_message(
-            embed=ticket_category_config_embed(interaction.guild),
-            view=TicketCategoryConfigView(),
-        )
 
     @discord.ui.button(label="Publier PDS-FDS", emoji="🚖", style=discord.ButtonStyle.success, row=4)
     async def publish_pds(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
