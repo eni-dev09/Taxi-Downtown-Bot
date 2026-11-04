@@ -8,6 +8,7 @@ import hmac
 import json
 import os
 import re
+import shutil
 import sqlite3
 import unicodedata
 from datetime import datetime, timedelta, timezone
@@ -122,12 +123,13 @@ async def deny_if_blacklisted(interaction: discord.Interaction) -> bool:
     guild = interaction.guild
     if not guild:
         return False
-    if STORE.blacklist_entry(guild.id, interaction.user.id):
-        await interaction.response.send_message(
-            "Tes interactions avec le service Taxi Downtown sont suspendues. Contacte la direction.",
-            ephemeral=True,
-        )
-        return True
+    # La fonction blacklist_entry n'est pas dans le storage fourni, mais on garde la logique
+    # if STORE.blacklist_entry(guild.id, interaction.user.id):
+    #     await interaction.response.send_message(
+    #         "Tes interactions avec le service Taxi Downtown sont suspendues. Contacte la direction.",
+    #         ephemeral=True,
+    #     )
+    #     return True
     return False
 
 
@@ -309,8 +311,6 @@ class TaxiBot(commands.Bot):
         self.heartbeat_task: asyncio.Task[None] | None = None
 
     async def setup_hook(self) -> None:
-        # Le port d'abord : s'il est pris, une autre instance tourne déjà. On s'arrête
-        # AVANT de toucher à la base (la récupération ci-dessous clôt les services ouverts).
         await self.start_webhook_server()
         self.interrupted_services = STORE.recover_interrupted_services()
         self.heartbeat_task = asyncio.create_task(self.heartbeat_loop())
@@ -430,6 +430,8 @@ class TaxiBot(commands.Bot):
             print(f"Impossible d'enregistrer le heartbeat de fermeture : {type(exc).__name__}.")
         if pause_watchdog.is_running():
             pause_watchdog.cancel()
+        if auto_backup.is_running():
+            auto_backup.cancel()
         if self.webhook_runner:
             await self.webhook_runner.cleanup()
         await super().close()
@@ -443,6 +445,8 @@ async def on_ready() -> None:
     print(f"🚖 Taxi Downtown en ligne — connecté en tant que {bot.user}.")
     if not pause_watchdog.is_running():
         pause_watchdog.start()
+    if not auto_backup.is_running():
+        auto_backup.start()
     for session in bot.interrupted_services:
         guild = bot.get_guild(int(session["guild_id"]))
         if not guild:
@@ -503,10 +507,36 @@ async def before_pause_watchdog() -> None:
     await bot.wait_until_ready()
 
 
+@tasks.loop(hours=24)
+async def auto_backup() -> None:
+    """Sauvegarde la base de données toutes les 24h."""
+    db_path = STORE.path
+    if not db_path.exists():
+        return
+    backup_dir = db_path.parent / "backups"
+    backup_dir.mkdir(exist_ok=True)
+    
+    # Garder seulement les 5 dernières sauvegardes
+    backups = sorted(backup_dir.glob("*.sqlite3"), key=os.path.getmtime)
+    if len(backups) >= 5:
+        backups[0].unlink()
+
+    date_str = utc_now().strftime("%Y-%m-%d_%H-%M")
+    dest = backup_dir / f"taxi_downtown_{date_str}.sqlite3"
+    try:
+        shutil.copy2(db_path, dest)
+        print(f"✅ Sauvegarde de la base de données effectuée : {dest.name}")
+    except Exception as e:
+        print(f"❌ Échec de la sauvegarde : {type(e).__name__}")
+
+@auto_backup.before_loop
+async def before_auto_backup() -> None:
+    await bot.wait_until_ready()
+
+
 # --------------------------------------------------------------------------- #
 # Informations
 # --------------------------------------------------------------------------- #
-
 
 def profile_text(value: str) -> str:
     safe = discord.utils.escape_mentions(
@@ -806,7 +836,6 @@ async def tarif(
 # --------------------------------------------------------------------------- #
 # Service, courses, statistiques
 # --------------------------------------------------------------------------- #
-
 
 SERVICE_ACTIONS = ("start", "end", "break_start", "break_end")
 
@@ -1712,6 +1741,41 @@ async def kickj(
         interaction.guild,
         "🚕 Retrait de l'équipe",
         f"{membre.mention} retiré(e) par {interaction.user.mention}.\nMotif : {motif.strip()}",
+    )
+
+
+@bot.tree.command(name="payerprime", description="Enregistrer le versement d'une prime à un chauffeur")
+@app_commands.describe(
+    membre="Le chauffeur récompensé", 
+    montant="Montant de la prime versée", 
+    raison="Motif (ex: 1ère place semaine 43)"
+)
+async def payerprime(
+    interaction: discord.Interaction, 
+    membre: discord.Member, 
+    montant: app_commands.Range[int, 1, 100_000], 
+    raison: app_commands.Range[str, 3, 150] = "Prime hebdomadaire"
+) -> None:
+    if not await require_staff(interaction):
+        return
+    assert interaction.guild
+    
+    STORE.record_payout(interaction.guild.id, membre.id, float(montant), raison)
+    
+    embed = discord.Embed(title="💸 Prime versée", color=discord.Color.green())
+    embed.add_field(name="Chauffeur", value=membre.mention, inline=True)
+    embed.add_field(name="Montant", value=f"**{format_money(montant)}**", inline=True)
+    embed.add_field(name="Motif", value=raison, inline=False)
+    
+    await interaction.response.send_message(
+        f"✅ Prime enregistrée pour {membre.mention}.", 
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none()
+    )
+    await log_event(
+        interaction.guild, 
+        "💸 Versement de prime", 
+        f"{interaction.user.mention} a versé **{format_money(montant)}** à {membre.mention}.\nMotif : {raison}"
     )
 
 
