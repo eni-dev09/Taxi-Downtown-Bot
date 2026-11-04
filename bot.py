@@ -586,6 +586,37 @@ def member_grade(member: discord.Member) -> str | None:
     return None
 
 
+def normalized_role_name(value: str) -> str:
+    """Compare role names without being sensitive to accents or case."""
+    return (
+        unicodedata.normalize("NFKD", value)
+        .encode("ascii", "ignore")
+        .decode()
+        .casefold()
+        .strip()
+    )
+
+
+def recruitment_roles(guild: discord.Guild, settings: dict[str, Any]) -> list[discord.Role]:
+    """Return the Discord roles granted to a newly accepted chauffeur.
+
+    The configured driver role is retained for servers whose role naming differs.
+    The three standard Taxi Downtown roles are also found by name so a new hire
+    always starts with the company, chauffeur and novice roles.
+    """
+    role_ids: set[int] = set()
+    driver_role_id = settings.get("driver_role_id")
+    if driver_role_id:
+        role_ids.add(int(driver_role_id))
+    wanted_names = {"taxi downtown", "chauffeur", "novice"}
+    role_ids.update(
+        role.id
+        for role in guild.roles
+        if normalized_role_name(role.name) in wanted_names
+    )
+    return [role for role in guild.roles if role.id in role_ids and not role.is_default()]
+
+
 def previous_week_stats(guild_id: int) -> dict[int, dict[str, float]]:
     start, _end = week_bounds()
     return STORE.weekly_stats(guild_id, start - timedelta(days=7), start)
@@ -1609,19 +1640,31 @@ async def recruter(
     if decision == "accept":
         STORE.set_employee_status(interaction.guild.id, membre.id, "active")
         settings = STORE.get_settings(interaction.guild.id)
-        role_id = settings.get("driver_role_id")
-        role = interaction.guild.get_role(int(role_id)) if role_id else None
+        roles_to_grant = [
+            role for role in recruitment_roles(interaction.guild, settings) if role not in membre.roles
+        ]
         role_note = ""
-        if role and role not in membre.roles:
+        if roles_to_grant:
             try:
-                await membre.add_roles(role, reason=f"Recrutement Taxi Downtown par {interaction.user}")
-                role_note = f" Le rôle {role.mention} a été attribué."
+                await membre.add_roles(
+                    *roles_to_grant,
+                    reason=f"Recrutement Taxi Downtown par {interaction.user}",
+                )
+                role_note = " Rôles attribués : " + ", ".join(
+                    role.mention for role in roles_to_grant
+                ) + "."
             except discord.Forbidden:
-                role_note = " ⚠️ Le bot n'a pas la permission d'attribuer le rôle."
+                role_note = (
+                    " ⚠️ Le bot n'a pas la permission d'attribuer un ou plusieurs rôles "
+                    "(vérifie `Gérer les rôles` et la hiérarchie)."
+                )
             except discord.HTTPException:
-                role_note = " ⚠️ L'attribution du rôle a échoué."
-        elif not role:
-            role_note = " Configure le rôle Chauffeur avec `/config` pour l'attribuer automatiquement."
+                role_note = " ⚠️ L'attribution des rôles a échoué côté Discord."
+        elif not recruitment_roles(interaction.guild, settings):
+            role_note = (
+                " ⚠️ Aucun rôle de recrutement trouvé. Crée les rôles `Taxi Downtown`, "
+                "`Chauffeur` et `Novice`, ou configure le rôle Chauffeur avec `/config`."
+            )
         message = f"✅ {membre.mention} a été recruté(e) chez Taxi Downtown.{role_note}"
         log_message = f"{interaction.user.mention} a accepté la candidature de {membre.mention}."
     else:
