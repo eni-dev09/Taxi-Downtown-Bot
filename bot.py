@@ -1830,8 +1830,8 @@ async def horaire(
 # --------------------------------------------------------------------------- #
 
 # Remplacez ces liens par vos propres images si vous le souhaitez
-IMAGE_OUVERT = "https://images.unsplash.com/photo-1557237925-05d7737375c8?q=80&w=1000&auto=format&fit=crop"
-IMAGE_FERMER = "https://images.unsplash.com/photo-1494791368093-85217fbbf8de?q=80&w=1000&auto=format&fit=crop"
+IMAGE_OUVERT = "https://i.postimg.cc/bN2rhrhh/image.png"
+IMAGE_FERMER = "https://i.postimg.cc/qBNyNkT3/Taxi-Ferme.png"
 
 @bot.tree.command(name="ouvert", description="Ouvre le service Taxi Downtown et prévient les citoyens")
 async def ouvert(interaction: discord.Interaction):
