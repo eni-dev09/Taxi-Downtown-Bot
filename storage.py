@@ -156,6 +156,14 @@ class TaxiStore:
                     state_key TEXT PRIMARY KEY,
                     state_value TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS payouts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    amount REAL NOT NULL,
+                    reason TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 """
             )
             break_columns = {
@@ -502,6 +510,15 @@ class TaxiStore:
             conn.execute(
                 "INSERT INTO trips (guild_id, user_id, fare, created_at) VALUES (?, ?, ?, ?)",
                 (guild_id, user_id, fare, to_iso()),
+            )
+
+    def record_payout(self, guild_id: int, user_id: int, amount: float, reason: str) -> None:
+        if amount <= 0:
+            raise ValueError("Le montant de la prime doit être positif.")
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO payouts (guild_id, user_id, amount, reason, created_at) VALUES (?, ?, ?, ?, ?)",
+                (guild_id, user_id, amount, reason, to_iso()),
             )
 
     def weekly_stats(
