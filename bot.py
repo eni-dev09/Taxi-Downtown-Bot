@@ -1825,6 +1825,78 @@ async def horaire(
     )
     await send_private_text(interaction, text)
 
+# --------------------------------------------------------------------------- #
+# Ouverture / Fermeture du service
+# --------------------------------------------------------------------------- #
+
+# Remplacez ces liens par vos propres images si vous le souhaitez
+IMAGE_OUVERT = "https://images.unsplash.com/photo-1557237925-05d7737375c8?q=80&w=1000&auto=format&fit=crop"
+IMAGE_FERMER = "https://images.unsplash.com/photo-1494791368093-85217fbbf8de?q=80&w=1000&auto=format&fit=crop"
+
+@bot.tree.command(name="ouvert", description="Ouvre le service Taxi Downtown et prévient les citoyens")
+async def ouvert(interaction: discord.Interaction):
+    # Réservé à la direction (ou aux chauffeurs selon votre choix, ici require_staff)
+    if not await require_staff(interaction):
+        return
+    assert interaction.guild
+    
+    # Recherche du rôle Citoyen pour faire un vrai ping
+    citoyen_role = discord.utils.get(interaction.guild.roles, name="Citoyen")
+    ping = citoyen_role.mention if citoyen_role else "@Citoyen"
+    
+    embed = discord.Embed(
+        title="🚖 Taxi Downtown — OUVERT 🟢",
+        description="Le service est désormais **ouvert** !\n\nNos chauffeurs sont prêts à vous conduire où vous le souhaitez. N'hésitez pas à nous contacter en jeu ou sur Discord.",
+        color=discord.Color.green(),
+        timestamp=utc_now()
+    )
+    embed.set_image(url=IMAGE_OUVERT)
+    embed.set_footer(text="Taxi Downtown - Toujours à votre service")
+    
+    await interaction.response.send_message(
+        content=f"{ping} 📢 **Le taxi est ouvert !**",
+        embed=embed,
+        allowed_mentions=discord.AllowedMentions(roles=True)
+    )
+    
+    await log_event(
+        interaction.guild,
+        "🟢 Ouverture du service",
+        f"Le service a été ouvert par {interaction.user.mention}."
+    )
+
+
+@bot.tree.command(name="fermer", description="Ferme le service Taxi Downtown et prévient les citoyens")
+async def fermer(interaction: discord.Interaction):
+    # Réservé à la direction
+    if not await require_staff(interaction):
+        return
+    assert interaction.guild
+    
+    # Recherche du rôle Citoyen pour faire un vrai ping
+    citoyen_role = discord.utils.get(interaction.guild.roles, name="Citoyen")
+    ping = citoyen_role.mention if citoyen_role else "@Citoyen"
+    
+    embed = discord.Embed(
+        title="🚖 Taxi Downtown — FERMÉ 🔴",
+        description="Le service est actuellement **fermé**.\n\nNous vous remercions de votre confiance et nous vous retrouverons très prochainement.",
+        color=discord.Color.red(),
+        timestamp=utc_now()
+    )
+    embed.set_image(url=IMAGE_FERMER)
+    embed.set_footer(text="Taxi Downtown - À bientôt")
+    
+    await interaction.response.send_message(
+        content=f"{ping} 📢 **Le taxi est fermé.**",
+        embed=embed,
+        allowed_mentions=discord.AllowedMentions(roles=True)
+    )
+    
+    await log_event(
+        interaction.guild,
+        "🔴 Fermeture du service",
+        f"Le service a été fermé par {interaction.user.mention}."
+    )
 
 @bot.tree.error
 async def on_app_command_error(
