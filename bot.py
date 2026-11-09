@@ -1043,6 +1043,7 @@ def request_pds_refresh(guild: discord.Guild) -> None:
 
 TICKET_KINDS = {
     "recrutement": ("Candidature", "📋", discord.ButtonStyle.success),
+    "partenariat": ("Partenariat", "🤝", discord.ButtonStyle.primary),
     "support": ("Question / Support", "❓", discord.ButtonStyle.primary),
     "signalement": ("Signalement / Plainte", "🚨", discord.ButtonStyle.danger),
 }
