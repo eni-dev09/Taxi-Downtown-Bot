@@ -1195,6 +1195,7 @@ def ticket_embed() -> discord.Embed:
             "Clique sur le bouton correspondant à ta demande : un salon privé sera créé "
             "avec la direction.\n\n"
             "📋 **Candidature** — rejoindre l'entreprise\n"
+            "🤝 **Partenariat** — proposer une collaboration\n"
             "❓ **Question / Support** — règles, tarifs, véhicules, planning\n"
             "🚨 **Signalement / Plainte** — problème avec un membre ou un client\n\n"
             "Un seul ticket ouvert à la fois."
