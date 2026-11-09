@@ -141,6 +141,39 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         store.clear_pds_panel(1)
         self.assertIsNone(store.get_pds_panel(1))
 
+    def test_ticket_category_uses_configured_category_for_each_kind(self):
+        from types import SimpleNamespace as NS
+        from unittest.mock import MagicMock, patch
+
+        cases = {
+            "partenariat": 1508807957779841175,
+            "recrutement": 1463497154575466622,
+            "support": 1508808019536904233,
+            "signalement": 1508808019536904233,
+        }
+        categories = {}
+        for kind, category_id in cases.items():
+            category = MagicMock(spec=self.bot.discord.CategoryChannel)
+            categories[category_id] = category
+            guild = NS(id=42, get_channel=lambda requested, values=categories: values.get(requested))
+            with patch.object(
+                self.bot.STORE, "get_settings",
+                return_value={f"ticket_category_{kind}_id": category_id},
+            ):
+                self.assertIs(self.bot.ticket_category_for(guild, kind), category)
+
+    def test_ticket_category_returns_none_for_missing_or_invalid_category(self):
+        from types import SimpleNamespace as NS
+        from unittest.mock import patch
+
+        guild = NS(id=42, get_channel=lambda _requested: None)
+        with patch.object(
+            self.bot.STORE, "get_settings",
+            return_value={"ticket_category_support_id": 123},
+        ):
+            self.assertIsNone(self.bot.ticket_category_for(guild, "support"))
+        self.assertIsNone(self.bot.ticket_category_for(guild, "unknown"))
+
     def test_ticket_panel_describes_every_ticket_kind(self):
         embed = self.bot.ticket_embed()
         for label, _emoji, _style in self.bot.TICKET_KINDS.values():
