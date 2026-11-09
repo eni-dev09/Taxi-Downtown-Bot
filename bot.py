@@ -8,7 +8,6 @@ import hmac
 import json
 import os
 import re
-import shutil
 import sqlite3
 import unicodedata
 from datetime import datetime, timedelta, timezone
@@ -509,25 +508,24 @@ async def before_pause_watchdog() -> None:
 
 @tasks.loop(hours=24)
 async def auto_backup() -> None:
-    """Sauvegarde la base de données toutes les 24h."""
+    """Sauvegarde cohérente de SQLite toutes les 24h (WAL inclus)."""
     db_path = STORE.path
     if not db_path.exists():
         return
-    backup_dir = db_path.parent / "backups"
-    backup_dir.mkdir(exist_ok=True)
-    
-    # Garder seulement les 5 dernières sauvegardes
-    backups = sorted(backup_dir.glob("*.sqlite3"), key=os.path.getmtime)
-    if len(backups) >= 5:
-        backups[0].unlink()
-
-    date_str = utc_now().strftime("%Y-%m-%d_%H-%M")
-    dest = backup_dir / f"taxi_downtown_{date_str}.sqlite3"
     try:
-        shutil.copy2(db_path, dest)
+        backup_dir = db_path.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        date_str = utc_now().strftime("%Y-%m-%d_%H-%M-%S")
+        dest = backup_dir / f"taxi_downtown_{date_str}.sqlite3"
+        STORE.backup_to(dest)
+
+        # Ne supprimer les anciennes sauvegardes qu'après validation de la nouvelle.
+        backups = sorted(backup_dir.glob("taxi_downtown_*.sqlite3"), key=os.path.getmtime)
+        for old_backup in backups[:-5]:
+            old_backup.unlink(missing_ok=True)
         print(f"✅ Sauvegarde de la base de données effectuée : {dest.name}")
-    except Exception as e:
-        print(f"❌ Échec de la sauvegarde : {type(e).__name__}")
+    except (OSError, sqlite3.Error) as exc:
+        print(f"❌ Échec de la sauvegarde SQLite : {type(exc).__name__}")
 
 @auto_backup.before_loop
 async def before_auto_backup() -> None:
