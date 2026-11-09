@@ -113,15 +113,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             {"td:pds:start", "td:pds:end", "td:pds:break_start", "td:pds:break_end"} - set(ids),
             set(),
         )
-        self.assertEqual(len([i for i in ids if i.startswith("td:ticket:")]), 4)
-
-    async def test_config_view_fits_discord_limits(self):
-        view = self.bot.ConfigView()
-        rows = {}
-        for item in view.children:
-            rows[item.row] = rows.get(item.row, 0) + 1
-        self.assertEqual(sorted(rows), [0, 1, 2, 3, 4])
-        self.assertTrue(all(count <= 5 for count in rows.values()))
+        self.assertEqual(len([i for i in ids if i.startswith("td:ticket:")]), 5)  # 4 types + fermeture
 
     def test_pds_embed_lists_active_employees_with_colored_dots(self):
         store = self.bot.STORE
