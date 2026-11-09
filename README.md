@@ -40,6 +40,14 @@ Top 1 heures, quota de 10 h (sinon avertissement ; déjà averti = licenciement 
 {"guild_id": 123456789012345678, "event": "course_terminee", "details": {"chauffeur": "Nom RP", "montant": 1250}}
 ```
 
-## Tests
+## Tests et intégration continue
 
-`python -m unittest discover -s tests`
+En local, avec l'environnement verrouillé :
+
+```bash
+uv sync --frozen
+uv run python -m compileall -q bot.py storage.py tests
+uv run python -m unittest discover -s tests -v
+```
+
+Le workflow GitHub Actions `.github/workflows/tests.yml` exécute la compilation et les tests avec Python 3.13 sur chaque push vers `main` et chaque pull request ciblant `main`.
