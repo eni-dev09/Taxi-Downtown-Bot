@@ -1234,9 +1234,96 @@ def config_embed(guild: discord.Guild) -> discord.Embed:
     embed.add_field(name="Chauffeurs", value=role("driver_role_id", "non configuré"))
     embed.add_field(name="Salon des journaux", value=channel("log_channel_id"))
     embed.add_field(name="Salon webhook in-game", value=channel("webhook_channel_id"))
+    for kind, label in (
+        ("partenariat", "Partenariat"),
+        ("recrutement", "Recrutement"),
+        ("support", "Direction · Support"),
+        ("signalement", "Direction · Signalement"),
+    ):
+        category_id = settings.get(f"ticket_category_{kind}_id")
+        embed.add_field(
+            name=f"Catégorie tickets · {label}",
+            value=f"<#{category_id}>" if category_id else "non configurée",
+            inline=True,
+        )
     embed.set_footer(
-        text="Sélectionne dans les menus pour modifier. Les boutons publient un panel dans ce salon."
+        text="Sélectionne les menus pour modifier les réglages. Les boutons ouvrent les panels ou la configuration des tickets."
     )
+    return embed
+
+
+class TicketCategoryConfigView(discord.ui.View):
+    """Admin-only selectors for the destination categories of ticket channels."""
+
+    def __init__(self) -> None:
+        super().__init__(timeout=900)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if is_admin(interaction):
+            return True
+        await interaction.response.send_message(
+            "Seuls les administrateurs peuvent configurer les tickets.", ephemeral=True
+        )
+        return False
+
+    async def _save(self, interaction: discord.Interaction, kind: str, category: discord.CategoryChannel) -> None:
+        assert interaction.guild
+        STORE.set_settings(
+            interaction.guild.id, **{f"ticket_category_{kind}_id": category.id}
+        )
+        await interaction.response.edit_message(
+            embed=ticket_category_config_embed(interaction.guild), view=self
+        )
+
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect, placeholder="Catégorie Partenariat", row=0,
+        channel_types=[discord.ChannelType.category], min_values=1, max_values=1,
+    )
+    async def pick_partnership(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect) -> None:
+        await self._save(interaction, "partenariat", select.values[0])
+
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect, placeholder="Catégorie Recrutement", row=1,
+        channel_types=[discord.ChannelType.category], min_values=1, max_values=1,
+    )
+    async def pick_recruitment(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect) -> None:
+        await self._save(interaction, "recrutement", select.values[0])
+
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect, placeholder="Catégorie Direction · Support", row=2,
+        channel_types=[discord.ChannelType.category], min_values=1, max_values=1,
+    )
+    async def pick_support(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect) -> None:
+        await self._save(interaction, "support", select.values[0])
+
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect, placeholder="Catégorie Direction · Signalement", row=3,
+        channel_types=[discord.ChannelType.category], min_values=1, max_values=1,
+    )
+    async def pick_reports(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect) -> None:
+        await self._save(interaction, "signalement", select.values[0])
+
+
+def ticket_category_config_embed(guild: discord.Guild) -> discord.Embed:
+    settings = STORE.get_settings(guild.id)
+    embed = discord.Embed(
+        title="🎫 Catégories des tickets",
+        description=(
+            "Choisis la catégorie Discord dans laquelle chaque type de ticket sera créé. "
+            "Support et signalement utilisent la catégorie Direction."
+        ),
+        color=discord.Color.gold(),
+    )
+    for kind, label in (
+        ("partenariat", "Partenariat"),
+        ("recrutement", "Recrutement"),
+        ("support", "Direction · Support"),
+        ("signalement", "Direction · Signalement"),
+    ):
+        category_id = settings.get(f"ticket_category_{kind}_id")
+        embed.add_field(
+            name=label, value=f"<#{category_id}>" if category_id else "non configurée"
+        )
     return embed
 
 
@@ -1308,6 +1395,17 @@ class ConfigView(discord.ui.View):
     @discord.ui.button(label="Publier Tickets", emoji="🎫", style=discord.ButtonStyle.primary, row=4)
     async def publish_tickets(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await self._publish(interaction, ticket_embed(), TicketPanelView())
+
+    @discord.ui.button(label="Catégories Tickets", emoji="🗂️", style=discord.ButtonStyle.secondary, row=4)
+    async def configure_ticket_categories(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        assert interaction.guild
+        await interaction.response.send_message(
+            embed=ticket_category_config_embed(interaction.guild),
+            view=TicketCategoryConfigView(),
+            ephemeral=True,
+        )
 
 
 @bot.tree.command(name="config", description="Panel de configuration (administrateurs)")
