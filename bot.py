@@ -1243,7 +1243,7 @@ def config_embed(guild: discord.Guild) -> discord.Embed:
         category_id = settings.get(f"ticket_category_{kind}_id")
         embed.add_field(
             name=f"Catégorie tickets · {label}",
-            value=f"<#{category_id}>" if category_id else "non configurée",
+            value=f"`{category_id}`" if category_id else "non configurée",
             inline=True,
         )
     embed.set_footer(
