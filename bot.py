@@ -8,7 +8,6 @@ import hmac
 import json
 import os
 import re
-import shutil
 import sqlite3
 import unicodedata
 from datetime import datetime, timedelta, timezone
@@ -334,7 +333,7 @@ class TaxiBot(commands.Bot):
         app.router.add_post("/webhook/ingame", self.receive_game_event)
         self.webhook_runner = web.AppRunner(app)
         await self.webhook_runner.setup()
-        port = int(os.getenv("WEBHOOK_PORT", "8000"))
+        port = int(os.getenv("WEBHOOK_PORT") or os.getenv("SERVER_PORT") or "8000")
         site = web.TCPSite(self.webhook_runner, "0.0.0.0", port)
         try:
             await site.start()
@@ -509,25 +508,24 @@ async def before_pause_watchdog() -> None:
 
 @tasks.loop(hours=24)
 async def auto_backup() -> None:
-    """Sauvegarde la base de données toutes les 24h."""
+    """Sauvegarde cohérente de SQLite toutes les 24h (WAL inclus)."""
     db_path = STORE.path
     if not db_path.exists():
         return
-    backup_dir = db_path.parent / "backups"
-    backup_dir.mkdir(exist_ok=True)
-    
-    # Garder seulement les 5 dernières sauvegardes
-    backups = sorted(backup_dir.glob("*.sqlite3"), key=os.path.getmtime)
-    if len(backups) >= 5:
-        backups[0].unlink()
-
-    date_str = utc_now().strftime("%Y-%m-%d_%H-%M")
-    dest = backup_dir / f"taxi_downtown_{date_str}.sqlite3"
     try:
-        shutil.copy2(db_path, dest)
+        backup_dir = db_path.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        date_str = utc_now().strftime("%Y-%m-%d_%H-%M-%S")
+        dest = backup_dir / f"taxi_downtown_{date_str}.sqlite3"
+        STORE.backup_to(dest)
+
+        # Ne supprimer les anciennes sauvegardes qu'après validation de la nouvelle.
+        backups = sorted(backup_dir.glob("taxi_downtown_*.sqlite3"), key=os.path.getmtime)
+        for old_backup in backups[:-5]:
+            old_backup.unlink(missing_ok=True)
         print(f"✅ Sauvegarde de la base de données effectuée : {dest.name}")
-    except Exception as e:
-        print(f"❌ Échec de la sauvegarde : {type(e).__name__}")
+    except (OSError, sqlite3.Error) as exc:
+        print(f"❌ Échec de la sauvegarde SQLite : {type(exc).__name__}")
 
 @auto_backup.before_loop
 async def before_auto_backup() -> None:
@@ -1043,9 +1041,21 @@ def request_pds_refresh(guild: discord.Guild) -> None:
 
 TICKET_KINDS = {
     "recrutement": ("Candidature", "📋", discord.ButtonStyle.success),
+    "partenariat": ("Partenariat", "🤝", discord.ButtonStyle.primary),
     "support": ("Question / Support", "❓", discord.ButtonStyle.primary),
     "signalement": ("Signalement / Plainte", "🚨", discord.ButtonStyle.danger),
 }
+
+
+def ticket_category_for(guild: discord.Guild, kind: str) -> discord.CategoryChannel | None:
+    """Return the configured Discord category for a ticket kind, if it still exists."""
+    if kind not in TICKET_KINDS:
+        return None
+    category_id = STORE.get_settings(guild.id).get(f"ticket_category_{kind}_id")
+    if not category_id:
+        return None
+    channel = guild.get_channel(int(category_id))
+    return channel if isinstance(channel, discord.CategoryChannel) else None
 
 
 class TicketModal(discord.ui.Modal):
@@ -1098,7 +1108,7 @@ class TicketModal(discord.ui.Modal):
                 attach_files=True, manage_messages=True,
             )
         slug = re.sub(r"[^a-z0-9-]", "", member.name.lower().replace(" ", "-")) or str(member.id)
-        category = getattr(interaction.channel, "category", None)
+        category = ticket_category_for(guild, self.kind)
         try:
             channel = await guild.create_text_channel(
                 f"{self.kind}-{slug}"[:90],
@@ -1194,6 +1204,7 @@ def ticket_embed() -> discord.Embed:
             "Clique sur le bouton correspondant à ta demande : un salon privé sera créé "
             "avec la direction.\n\n"
             "📋 **Candidature** — rejoindre l'entreprise\n"
+            "🤝 **Partenariat** — proposer une collaboration\n"
             "❓ **Question / Support** — règles, tarifs, véhicules, planning\n"
             "🚨 **Signalement / Plainte** — problème avec un membre ou un client\n\n"
             "Un seul ticket ouvert à la fois."
@@ -1223,9 +1234,96 @@ def config_embed(guild: discord.Guild) -> discord.Embed:
     embed.add_field(name="Chauffeurs", value=role("driver_role_id", "non configuré"))
     embed.add_field(name="Salon des journaux", value=channel("log_channel_id"))
     embed.add_field(name="Salon webhook in-game", value=channel("webhook_channel_id"))
+    for kind, label in (
+        ("partenariat", "Partenariat"),
+        ("recrutement", "Recrutement"),
+        ("support", "Direction · Support"),
+        ("signalement", "Direction · Signalement"),
+    ):
+        category_id = settings.get(f"ticket_category_{kind}_id")
+        embed.add_field(
+            name=f"Catégorie tickets · {label}",
+            value=f"`{category_id}`" if category_id else "non configurée",
+            inline=True,
+        )
     embed.set_footer(
-        text="Sélectionne dans les menus pour modifier. Les boutons publient un panel dans ce salon."
+        text="Sélectionne les menus pour modifier les réglages. Les boutons ouvrent les panels ou la configuration des tickets."
     )
+    return embed
+
+
+class TicketCategoryConfigView(discord.ui.View):
+    """Admin-only selectors for the destination categories of ticket channels."""
+
+    def __init__(self) -> None:
+        super().__init__(timeout=900)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if is_admin(interaction):
+            return True
+        await interaction.response.send_message(
+            "Seuls les administrateurs peuvent configurer les tickets.", ephemeral=True
+        )
+        return False
+
+    async def _save(self, interaction: discord.Interaction, kind: str, category: discord.CategoryChannel) -> None:
+        assert interaction.guild
+        STORE.set_settings(
+            interaction.guild.id, **{f"ticket_category_{kind}_id": category.id}
+        )
+        await interaction.response.edit_message(
+            embed=ticket_category_config_embed(interaction.guild), view=self
+        )
+
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect, placeholder="Catégorie Partenariat", row=0,
+        channel_types=[discord.ChannelType.category], min_values=1, max_values=1,
+    )
+    async def pick_partnership(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect) -> None:
+        await self._save(interaction, "partenariat", select.values[0])
+
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect, placeholder="Catégorie Recrutement", row=1,
+        channel_types=[discord.ChannelType.category], min_values=1, max_values=1,
+    )
+    async def pick_recruitment(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect) -> None:
+        await self._save(interaction, "recrutement", select.values[0])
+
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect, placeholder="Catégorie Direction · Support", row=2,
+        channel_types=[discord.ChannelType.category], min_values=1, max_values=1,
+    )
+    async def pick_support(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect) -> None:
+        await self._save(interaction, "support", select.values[0])
+
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect, placeholder="Catégorie Direction · Signalement", row=3,
+        channel_types=[discord.ChannelType.category], min_values=1, max_values=1,
+    )
+    async def pick_reports(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect) -> None:
+        await self._save(interaction, "signalement", select.values[0])
+
+
+def ticket_category_config_embed(guild: discord.Guild) -> discord.Embed:
+    settings = STORE.get_settings(guild.id)
+    embed = discord.Embed(
+        title="🎫 Catégories des tickets",
+        description=(
+            "Choisis la catégorie Discord dans laquelle chaque type de ticket sera créé. "
+            "Support et signalement utilisent la catégorie Direction."
+        ),
+        color=discord.Color.gold(),
+    )
+    for kind, label in (
+        ("partenariat", "Partenariat"),
+        ("recrutement", "Recrutement"),
+        ("support", "Direction · Support"),
+        ("signalement", "Direction · Signalement"),
+    ):
+        category_id = settings.get(f"ticket_category_{kind}_id")
+        embed.add_field(
+            name=label, value=f"<#{category_id}>" if category_id else "non configurée"
+        )
     return embed
 
 
@@ -1297,6 +1395,17 @@ class ConfigView(discord.ui.View):
     @discord.ui.button(label="Publier Tickets", emoji="🎫", style=discord.ButtonStyle.primary, row=4)
     async def publish_tickets(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await self._publish(interaction, ticket_embed(), TicketPanelView())
+
+    @discord.ui.button(label="Catégories Tickets", emoji="🗂️", style=discord.ButtonStyle.secondary, row=4)
+    async def configure_ticket_categories(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        assert interaction.guild
+        await interaction.response.send_message(
+            embed=ticket_category_config_embed(interaction.guild),
+            view=TicketCategoryConfigView(),
+            ephemeral=True,
+        )
 
 
 @bot.tree.command(name="config", description="Panel de configuration (administrateurs)")

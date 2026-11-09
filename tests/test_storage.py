@@ -197,6 +197,25 @@ class TaxiStoreTests(unittest.TestCase):
         self.assertEqual(migrated["ticket_category_recrutement_id"], 1463497154575466622)
         self.assertEqual(migrated["ticket_category_partenariat_id"], 1508807957779841175)
 
+    def test_online_backup_contains_committed_data_and_is_valid(self):
+        self.store.record_trip(91, 92, 1234)
+        destination = Path(self.temp_dir.name) / "backups" / "snapshot.sqlite3"
+
+        result = self.store.backup_to(destination)
+
+        self.assertEqual(result, destination)
+        conn = sqlite3.connect(destination)
+        try:
+            self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            self.assertEqual(
+                conn.execute(
+                    "SELECT fare FROM trips WHERE guild_id = 91 AND user_id = 92"
+                ).fetchone()[0],
+                1234,
+            )
+        finally:
+            conn.close()
+
     def test_database_connections_are_closed_after_use(self):
         with self.store._connect() as conn:
             connection = conn

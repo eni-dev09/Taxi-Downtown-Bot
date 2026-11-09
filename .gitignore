@@ -1,7 +1,36 @@
+# Local databases and SQLite sidecars
+/data/
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
 /fleet_records.sqlite3
 /fleet_records.sqlite3-shm
 /fleet_records.sqlite3-wal
-/data/
-/node_modules/
-/__pycache__/
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Replit / local tooling
+.replit
+# Keep .replit tracked if it is part of the deployment configuration:
+!.replit
+
+# Node and generated files
+node_modules/
+*.log
+.DS_Store
