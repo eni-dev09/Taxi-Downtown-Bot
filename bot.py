@@ -333,7 +333,7 @@ class TaxiBot(commands.Bot):
         app.router.add_post("/webhook/ingame", self.receive_game_event)
         self.webhook_runner = web.AppRunner(app)
         await self.webhook_runner.setup()
-        port = int(os.getenv("WEBHOOK_PORT", "8000"))
+        port = int(os.getenv("WEBHOOK_PORT") or os.getenv("SERVER_PORT") or "8000")
         site = web.TCPSite(self.webhook_runner, "0.0.0.0", port)
         try:
             await site.start()
