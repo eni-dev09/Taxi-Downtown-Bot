@@ -141,6 +141,12 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         store.clear_pds_panel(1)
         self.assertIsNone(store.get_pds_panel(1))
 
+    def test_ticket_panel_describes_every_ticket_kind(self):
+        embed = self.bot.ticket_embed()
+        for label, _emoji, _style in self.bot.TICKET_KINDS.values():
+            with self.subTest(ticket_kind=label):
+                self.assertIn(label, embed.description)
+
     def test_ticket_lifecycle_storage(self):
         store = self.bot.STORE
         self.assertIsNone(store.open_ticket_for(1, 2))
