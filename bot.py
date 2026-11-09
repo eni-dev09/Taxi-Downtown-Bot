@@ -1049,6 +1049,17 @@ TICKET_KINDS = {
 }
 
 
+def ticket_category_for(guild: discord.Guild, kind: str) -> discord.CategoryChannel | None:
+    """Return the configured Discord category for a ticket kind, if it still exists."""
+    if kind not in TICKET_KINDS:
+        return None
+    category_id = STORE.get_settings(guild.id).get(f"ticket_category_{kind}_id")
+    if not category_id:
+        return None
+    channel = guild.get_channel(int(category_id))
+    return channel if isinstance(channel, discord.CategoryChannel) else None
+
+
 class TicketModal(discord.ui.Modal):
     def __init__(self, kind: str) -> None:
         label = TICKET_KINDS[kind][0]
@@ -1099,7 +1110,7 @@ class TicketModal(discord.ui.Modal):
                 attach_files=True, manage_messages=True,
             )
         slug = re.sub(r"[^a-z0-9-]", "", member.name.lower().replace(" ", "-")) or str(member.id)
-        category = getattr(interaction.channel, "category", None)
+        category = ticket_category_for(guild, self.kind)
         try:
             channel = await guild.create_text_channel(
                 f"{self.kind}-{slug}"[:90],
