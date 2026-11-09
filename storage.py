@@ -209,6 +209,26 @@ class TaxiStore:
             "VALUES ('extra_plates_migrated', '1')"
         )
 
+    def backup_to(self, destination: Path | str) -> Path:
+        """Create a consistent SQLite snapshot, including committed WAL data."""
+        target = Path(destination)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with self._connect() as source:
+                backup = sqlite3.connect(target, timeout=10)
+                try:
+                    source.backup(backup)
+                    result = backup.execute("PRAGMA integrity_check").fetchone()
+                    if not result or result[0] != "ok":
+                        raise sqlite3.DatabaseError("SQLite backup integrity check failed")
+                    backup.commit()
+                finally:
+                    backup.close()
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
+        return target
+
     def get_settings(self, guild_id: int) -> dict[str, Any]:
         with self._connect() as conn:
             row = conn.execute(
