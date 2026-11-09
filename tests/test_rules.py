@@ -174,6 +174,35 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(self.bot.ticket_category_for(guild, "support"))
         self.assertIsNone(self.bot.ticket_category_for(guild, "unknown"))
 
+    def test_ticket_category_config_view_exposes_four_category_selectors(self):
+        view = self.bot.TicketCategoryConfigView()
+        self.assertEqual(len(view.children), 4)
+        self.assertEqual(
+            {item.placeholder for item in view.children},
+            {
+                "Catégorie Partenariat",
+                "Catégorie Recrutement",
+                "Catégorie Direction · Support",
+                "Catégorie Direction · Signalement",
+            },
+        )
+
+    def test_ticket_category_config_embed_shows_the_configured_ids(self):
+        from types import SimpleNamespace as NS
+        from unittest.mock import patch
+
+        settings = {
+            "ticket_category_partenariat_id": 1508807957779841175,
+            "ticket_category_recrutement_id": 1463497154575466622,
+            "ticket_category_support_id": 1508808019536904233,
+            "ticket_category_signalement_id": 1508808019536904233,
+        }
+        with patch.object(self.bot.STORE, "get_settings", return_value=settings):
+            embed = self.bot.ticket_category_config_embed(NS(id=42))
+        rendered = " ".join(field.value for field in embed.fields)
+        for category_id in settings.values():
+            self.assertIn(str(category_id), rendered)
+
     def test_ticket_panel_describes_every_ticket_kind(self):
         embed = self.bot.ticket_embed()
         for label, _emoji, _style in self.bot.TICKET_KINDS.values():
