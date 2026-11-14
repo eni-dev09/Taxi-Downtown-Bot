@@ -76,6 +76,12 @@ class TaxiStore:
                     ticket_category_partenariat_id INTEGER DEFAULT 1508807957779841175,
                     weekly_quota_hours REAL NOT NULL DEFAULT 10
                 );
+                CREATE TABLE IF NOT EXISTS module_config (
+                    guild_id INTEGER NOT NULL,
+                    config_key TEXT NOT NULL,
+                    config_value TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, config_key)
+                );
                 CREATE TABLE IF NOT EXISTS employees (
                     guild_id INTEGER NOT NULL,
                     user_id INTEGER NOT NULL,
@@ -800,3 +806,27 @@ class TaxiStore:
     def clear_pds_panel(self, guild_id: int) -> None:
         with self._connect() as conn:
             conn.execute("DELETE FROM runtime_state WHERE state_key = ?", (f"pds_panel:{guild_id}",))
+
+    # --- configuration par modules (/config) -----------------------------
+    def get_config(self, guild_id: int) -> dict[str, str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT config_key, config_value FROM module_config WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchall()
+        return {row["config_key"]: row["config_value"] for row in rows}
+
+    def set_config(self, guild_id: int, key: str, value: str | None) -> None:
+        """Store a value; None removes it (back to the default)."""
+        with self._connect() as conn:
+            if value is None:
+                conn.execute(
+                    "DELETE FROM module_config WHERE guild_id = ? AND config_key = ?",
+                    (guild_id, key),
+                )
+            else:
+                conn.execute(
+                    "INSERT OR REPLACE INTO module_config (guild_id, config_key, config_value) "
+                    "VALUES (?, ?, ?)",
+                    (guild_id, key, value),
+                )

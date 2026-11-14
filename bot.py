@@ -20,6 +20,10 @@ from aiohttp import web
 from discord import app_commands
 from discord.ext import commands, tasks
 
+import config_ui
+import features
+from dataclasses import dataclass
+from features import GuildConfig
 from storage import TaxiStore, parse_iso, utc_now
 
 
@@ -50,6 +54,28 @@ FARE_EXTRA_PASSENGER = 50
 FARE_BIG_LUGGAGE = 25
 FARE_BOOKING = 50
 STORE = TaxiStore()
+
+
+def gcfg(guild_id: int) -> GuildConfig:
+    """Configuration courante (/config) d'un serveur."""
+    return GuildConfig.load(STORE, guild_id)
+
+
+@dataclass(frozen=True)
+class Rules:
+    """Règles chiffrées d'un serveur (valeurs par défaut = règles Taxi Downtown)."""
+
+    min_hours: float = MIN_HOURS_FOR_PRIME
+    primes: tuple[int, int, int] = WEEKLY_PRIMES
+    max_break_seconds: int = MAX_BREAK_SECONDS
+
+
+DEFAULT_RULES = Rules()
+
+
+def rules_for(guild_id: int) -> Rules:
+    cfg = gcfg(guild_id)
+    return Rules(cfg.get("min_hours"), cfg.primes(), int(cfg.get("max_break_minutes")) * 60)
 
 intents = discord.Intents.default()
 intents.members = True
@@ -107,6 +133,20 @@ async def require_guild(interaction: discord.Interaction) -> bool:
     return False
 
 
+async def require_feature(interaction: discord.Interaction, module_key: str) -> bool:
+    """Bloque la commande si son module est désactivé dans /config."""
+    guild = interaction.guild
+    if guild is None:
+        return await require_guild(interaction)
+    if gcfg(guild.id).enabled(module_key):
+        return True
+    module = features.MODULES[module_key]
+    await interaction.response.send_message(
+        f"⛔ **{module.label}** est désactivé par la direction (`/config`).", ephemeral=True
+    )
+    return False
+
+
 async def require_staff(interaction: discord.Interaction) -> bool:
     if not await require_guild(interaction):
         return False
@@ -133,12 +173,42 @@ async def deny_if_blacklisted(interaction: discord.Interaction) -> bool:
     return False
 
 
+LOG_MODULES = {
+    "service": ("log_service", "log_channel_service"),
+    "tickets": ("log_tickets", "log_channel_tickets"),
+    "rh": ("log_rh", "log_channel_rh"),
+}
+
+
+def log_kind(title: str) -> str:
+    """Journal visé selon le titre : service, tickets, rh (défaut) ou general."""
+    if title.startswith(("🕒", "⏰", "🚕 Course", "🟢", "🔴")) or "Service interrompu" in title:
+        return "service"
+    if title.startswith(("🎫", "🔒")):
+        return "tickets"
+    if title.startswith("⚙️"):
+        return "general"
+    return "rh"
+
+
 async def log_event(
     guild: discord.Guild, title: str, description: str, *, webhook: bool = False
 ) -> bool:
-    settings = STORE.get_settings(guild.id)
-    channel_id = settings.get("webhook_channel_id") if webhook else settings.get("log_channel_id")
-    channel_id = channel_id or settings.get("log_channel_id")
+    cfg = gcfg(guild.id)
+    if not cfg.enabled("log_general"):
+        return False
+    channel_id = None
+    if webhook:
+        if not cfg.enabled("ingame"):
+            return False
+        channel_id = cfg.get("webhook_channel_id")
+    else:
+        module_key, channel_key = LOG_MODULES.get(log_kind(title), (None, None))
+        if module_key:
+            if not cfg.enabled(module_key):
+                return False
+            channel_id = cfg.get(channel_key)
+    channel_id = channel_id or cfg.get("log_channel_id")
     if not channel_id:
         return False
     channel = guild.get_channel(int(channel_id))
@@ -176,6 +246,7 @@ EMPTY_STATS = {"hours": 0.0, "fare": 0.0, "trips": 0.0}
 
 def prime_ranking(
     stats: dict[int, dict[str, float]],
+    rules: Rules = DEFAULT_RULES,
 ) -> tuple[list[tuple[int, float]], list[tuple[int, float]]]:
     """Return (eligible, not_eligible) as (user_id, hours) lists.
 
@@ -185,7 +256,7 @@ def prime_ranking(
     eligible = [
         uid
         for uid, item in stats.items()
-        if item["hours"] >= MIN_HOURS_FOR_PRIME
+        if item["hours"] >= rules.min_hours
     ]
     eligible.sort(
         key=lambda uid: (stats[uid]["fare"], stats[uid]["trips"], stats[uid]["hours"]),
@@ -207,11 +278,13 @@ def ordinal(n: int) -> str:
     return f"{n}re" if n == 1 else f"{n}e"
 
 
-def prime_for(stats: dict[int, dict[str, float]], user_id: int) -> int:
-    eligible, _ = prime_ranking(stats)
-    for index, (uid, _hours) in enumerate(eligible[: len(WEEKLY_PRIMES)]):
+def prime_for(
+    stats: dict[int, dict[str, float]], user_id: int, rules: Rules = DEFAULT_RULES
+) -> int:
+    eligible, _ = prime_ranking(stats, rules)
+    for index, (uid, _hours) in enumerate(eligible[: len(rules.primes)]):
         if uid == user_id:
-            return WEEKLY_PRIMES[index]
+            return rules.primes[index]
     return 0
 
 
@@ -227,26 +300,34 @@ def compute_fare(
     extra_passengers: int = 0,
     big_luggage: int = 0,
     booking: bool = False,
+    rates: dict[str, int] | None = None,
+    supplements: dict[str, int] | None = None,
 ) -> tuple[int, list[str]]:
     """Tarif par zone : tarif/km × km facturé + suppléments."""
+    sup = supplements or {
+        "wait": FARE_WAIT_PER_MIN,
+        "passenger": FARE_EXTRA_PASSENGER,
+        "luggage": FARE_BIG_LUGGAGE,
+        "booking": FARE_BOOKING,
+    }
     units = billed_km(km)
-    rate = ZONE_RATES[zone]
+    rate = (rates or ZONE_RATES)[zone]
     total = units * rate
     lines = [
         f"{ZONE_LABELS[zone]} — {km:g} km → {units} km facturé(s) × {rate} : {format_money(total)}"
     ]
     for count, unit, label in (
-        (wait_minutes, FARE_WAIT_PER_MIN, "Attente (min)"),
-        (extra_passengers, FARE_EXTRA_PASSENGER, "Passager(s) supplémentaire(s)"),
-        (big_luggage, FARE_BIG_LUGGAGE, "Gros bagage(s)"),
+        (wait_minutes, sup["wait"], "Attente (min)"),
+        (extra_passengers, sup["passenger"], "Passager(s) supplémentaire(s)"),
+        (big_luggage, sup["luggage"], "Gros bagage(s)"),
     ):
         if count:
             amount = count * unit
             total += amount
             lines.append(f"{label} {count} × {unit} : {format_money(amount)}")
     if booking:
-        total += FARE_BOOKING
-        lines.append(f"Réservation à l'avance : {format_money(FARE_BOOKING)}")
+        total += sup["booking"]
+        lines.append(f"Réservation à l'avance : {format_money(sup['booking'])}")
     return total, lines
 
 
@@ -452,8 +533,8 @@ async def on_ready() -> None:
         if not guild:
             continue
         break_note = (
-            " La pause active dépassait la limite de 30 minutes."
-            if session["open_break_seconds"] > MAX_BREAK_SECONDS
+            " La pause active dépassait la limite de pause."
+            if session["open_break_seconds"] > rules_for(guild.id).max_break_seconds
             else ""
         )
         await log_event(
@@ -471,11 +552,21 @@ async def on_ready() -> None:
 @tasks.loop(seconds=60)
 async def pause_watchdog() -> None:
     try:
-        overdue = STORE.overdue_breaks(utc_now() - timedelta(seconds=MAX_BREAK_SECONDS))
+        # Seuil le plus bas autorisé (5 min) : la limite de chaque serveur est vérifiée ensuite.
+        overdue = STORE.overdue_breaks(utc_now() - timedelta(minutes=5))
     except sqlite3.Error as exc:
         print(f"Surveillance des pauses indisponible : {type(exc).__name__}.")
         return
     for entry in overdue:
+        guild = bot.get_guild(int(entry["guild_id"]))
+        if not guild:
+            continue
+        cfg = gcfg(guild.id)
+        if not cfg.enabled("pauses"):
+            continue
+        limit = int(cfg.get("max_break_minutes"))
+        if parse_iso(entry["started_at"]) > utc_now() - timedelta(minutes=limit):
+            continue
         try:
             marked = STORE.mark_break_reminded(int(entry["break_id"]))
         except sqlite3.Error as exc:
@@ -483,21 +574,18 @@ async def pause_watchdog() -> None:
             continue
         if not marked:
             continue
-        guild = bot.get_guild(int(entry["guild_id"]))
-        if not guild:
-            continue
         member = guild.get_member(int(entry["user_id"]))
         if member:
             try:
                 await member.send(
-                    "⏰ Ta pause Taxi Downtown dépasse 30 minutes. "
+                    f"⏰ Ta pause Taxi Downtown dépasse {limit} minutes. "
                     "Termine-la avec le bouton Reprise du panel PDS-FDS et contacte la direction en cas d'exception."
                 )
             except (discord.Forbidden, discord.HTTPException):
                 pass
         await log_event(
             guild,
-            "⏰ Pause de plus de 30 minutes",
+            f"⏰ Pause de plus de {limit} minutes",
             f"<@{entry['user_id']}> a dépassé la limite de pause consécutive.",
         )
 
@@ -513,13 +601,17 @@ async def auto_backup() -> None:
     db_path = STORE.path
     if not db_path.exists():
         return
+    guild_configs = [gcfg(guild.id) for guild in bot.guilds]
+    if guild_configs and not any(cfg.enabled("backup") for cfg in guild_configs):
+        return
+    keep = max([int(cfg.get("backup_keep")) for cfg in guild_configs] or [5])
     backup_dir = db_path.parent / "backups"
     backup_dir.mkdir(exist_ok=True)
     
     # Garder seulement les 5 dernières sauvegardes
     backups = sorted(backup_dir.glob("*.sqlite3"), key=os.path.getmtime)
-    if len(backups) >= 5:
-        backups[0].unlink()
+    while len(backups) >= keep:
+        backups.pop(0).unlink()
 
     date_str = utc_now().strftime("%Y-%m-%d_%H-%M")
     dest = backup_dir / f"taxi_downtown_{date_str}.sqlite3"
@@ -545,32 +637,42 @@ def profile_text(value: str) -> str:
     return safe.replace("<@", "<@​").replace("<#", "<#​")
 
 
-def prime_status_line(stats: dict[int, dict[str, float]], user_id: int) -> str:
+def prime_status_line(
+    stats: dict[int, dict[str, float]], user_id: int, rules: Rules = DEFAULT_RULES
+) -> str:
     hours = stats.get(user_id, EMPTY_STATS)["hours"]
-    if hours < MIN_HOURS_FOR_PRIME:
+    if hours < rules.min_hours:
         return (
             f"Prime : non éligible — il manque "
-            f"{format_duration(MIN_HOURS_FOR_PRIME - hours)} (minimum {MIN_HOURS_FOR_PRIME:g} h)"
+            f"{format_duration(rules.min_hours - hours)} (minimum {rules.min_hours:g} h)"
         )
-    eligible, _ = prime_ranking(stats)
+    eligible, _ = prime_ranking(stats, rules)
     rank = next(i for i, (uid, _h) in enumerate(eligible, start=1) if uid == user_id)
-    prime = prime_for(stats, user_id)
+    prime = prime_for(stats, user_id, rules)
     if prime:
         return f"Prime : **{ordinal(rank)} place — {format_money(prime)}**"
     return f"Prime : {ordinal(rank)} place (hors podium)"
 
 
-def weekly_lines(stats: dict[int, dict[str, float]], user_id: int) -> list[str]:
+def weekly_lines(
+    stats: dict[int, dict[str, float]], user_id: int, rules: Rules = DEFAULT_RULES
+) -> list[str]:
     data = stats.get(user_id, EMPTY_STATS)
     return [
         f"Heures : {format_duration(data['hours'])} · Courses : {int(data['trips'])}",
         f"Argent rapporté : {format_money(data['fare'])}",
-        prime_status_line(stats, user_id),
+        prime_status_line(stats, user_id, rules),
     ]
 
 
-def member_grade(member: discord.Member) -> str | None:
-    """Grade déduit du nom des rôles Discord (plus haut grade en priorité)."""
+def member_grade(member: discord.Member, cfg: GuildConfig | None = None) -> str | None:
+    """Grade : rôles choisis dans /config (plus haut en priorité), sinon nom des rôles."""
+    if cfg is not None:
+        member_role_ids = {getattr(role, "id", None) for role in getattr(member, "roles", [])}
+        for key in ("chef", "senior", "confirme", "novice"):
+            role_id = cfg.get(f"grade_role_{key}")
+            if role_id and role_id in member_role_ids:
+                return key
     names = " | ".join(
         unicodedata.normalize("NFKD", role.name).encode("ascii", "ignore").decode().lower()
         for role in getattr(member, "roles", [])
@@ -608,6 +710,11 @@ def recruitment_roles(guild: discord.Guild, settings: dict[str, Any]) -> list[di
     driver_role_id = settings.get("driver_role_id")
     if driver_role_id:
         role_ids.add(int(driver_role_id))
+    cfg = GuildConfig(settings, STORE.get_config(guild.id))
+    for key in ("recruit_company_role", "grade_role_novice"):
+        configured = cfg.get(key)
+        if configured:
+            role_ids.add(int(configured))
     wanted_names = {"taxi downtown", "chauffeur", "novice"}
     role_ids.update(
         role.id
@@ -638,7 +745,9 @@ def missing(data: dict[str, float], need_money: int, need_hours: float) -> str:
 def employee_profile(guild: discord.Guild, member: discord.Member) -> str:
     start, _end, stats = weekly_totals(guild.id)
     data = stats.get(member.id, EMPTY_STATS)
-    grade = member_grade(member)
+    cfg = gcfg(guild.id)
+    rules = rules_for(guild.id)
+    grade = member_grade(member, cfg)
     status = STORE.employee_status(guild.id, member.id)
     status_label = {
         "active": "Actif",
@@ -674,14 +783,14 @@ def employee_profile(guild: discord.Guild, member: discord.Member) -> str:
         )
     else:
         lines.append("Top 1 heures : non (aucune heure)")
-    quota_ok = data["hours"] >= MIN_HOURS_FOR_PRIME
+    quota_ok = data["hours"] >= rules.min_hours
     lines.append(
-        f"Quota {MIN_HOURS_FOR_PRIME:g} h : ✅ atteint"
+        f"Quota {rules.min_hours:g} h : ✅ atteint"
         if quota_ok
-        else f"Quota {MIN_HOURS_FOR_PRIME:g} h : ❌ il manque "
-        f"{format_duration(MIN_HOURS_FOR_PRIME - data['hours'])}"
+        else f"Quota {rules.min_hours:g} h : ❌ il manque "
+        f"{format_duration(rules.min_hours - data['hours'])}"
     )
-    lines.append(prime_status_line(stats, member.id))
+    lines.append(prime_status_line(stats, member.id, rules))
 
     lines.append("**Avertissement**")
     if quota_ok:
@@ -704,7 +813,8 @@ def employee_profile(guild: discord.Guild, member: discord.Member) -> str:
 
     lines.append("**Passage de grade**")
     if grade in PROMOTIONS:
-        target, need_money, need_hours = PROMOTIONS[grade]
+        target = PROMOTIONS[grade][0]
+        need_money, need_hours = cfg.promotion(grade)
         lines.append(f"Objectif : {target} ({format_money(need_money)} + {need_hours:g} h)")
         ok_now = meets(data, need_money, need_hours)
         lines.append(
@@ -768,6 +878,16 @@ async def info(
         await send_private_text(interaction, employee_profile(interaction.guild, membre))
         return
 
+    cfg = gcfg(interaction.guild.id) if interaction.guild else GuildConfig({}, {})
+    rules = rules_for(interaction.guild.id) if interaction.guild else DEFAULT_RULES
+    zone_rates = cfg.zone_rates()
+    sup = cfg.supplements()
+    promo = {grade: cfg.promotion(grade) for grade in ("novice", "confirme", "senior")}
+
+    def money_hours(grade: str) -> str:
+        money, hours = promo[grade]
+        return f"{format_money(money)} + {hours:g} h"
+
     embed = discord.Embed(
         title="🚖 Taxi Downtown — Informations",
         description="Entreprise de taxi de Sensity RP.",
@@ -776,10 +896,12 @@ async def info(
     embed.add_field(
         name="Tarifs",
         value=(
-            "**Ville 700 $/km · Hors ville 1 000 $/km · Cayo 1 300 $/km**\n"
-            "Km arrondi au supérieur à partir de x,8 (ex. ville : 1,7 km = 700 $, 1,8 km = 1 400 $)\n"
-            f"Attente {FARE_WAIT_PER_MIN} $/min · passager supplémentaire +{FARE_EXTRA_PASSENGER} $ · "
-            f"gros bagage +{FARE_BIG_LUGGAGE} $ · réservation à l'avance +{FARE_BOOKING} $\n"
+            f"**Ville {format_money(zone_rates['ville'])}/km · "
+            f"Hors ville {format_money(zone_rates['hors_ville'])}/km · "
+            f"Cayo {format_money(zone_rates['cayo'])}/km**\n"
+            "Km arrondi au supérieur à partir de x,8 (ex. 1,7 km = 1 km, 1,8 km = 2 km)\n"
+            f"Attente {sup['wait']} $/min · passager supplémentaire +{sup['passenger']} $ · "
+            f"gros bagage +{sup['luggage']} $ · réservation à l'avance +{sup['booking']} $\n"
             "Transport médical : 300 à 600 $"
         ),
         inline=False,
@@ -790,9 +912,9 @@ async def info(
             "Pas de salaire : primes versées le dimanche soir.\n"
             + " · ".join(
                 f"{ordinal(place)} {format_money(prime)}"
-                for place, prime in enumerate(WEEKLY_PRIMES, start=1)
+                for place, prime in enumerate(rules.primes, start=1)
             )
-            + f"\nMinimum **{MIN_HOURS_FOR_PRIME:g} h** de service. Classement selon l'argent "
+            + f"\nMinimum **{rules.min_hours:g} h** de service. Classement selon l'argent "
             "rapporté, le nombre de courses et l'activité."
         ),
         inline=False,
@@ -800,7 +922,7 @@ async def info(
     embed.add_field(
         name="Règles",
         value=(
-            "Prise et fin de service via le panel PDS-FDS · pause de 30 min maximum · "
+            f"Prise et fin de service via le panel PDS-FDS · pause de {rules.max_break_seconds // 60} min maximum · "
             "l'entretien du véhicule est à la charge de l'employé."
         ),
         inline=False,
@@ -808,13 +930,13 @@ async def info(
     embed.add_field(
         name="Passages de grade",
         value=(
-            "**Novice → Confirmé** : 7 500 $ + 7,5 h, période d'essai (~1 semaine), "
+            f"**Novice → Confirmé** : {money_hours('novice')}, période d'essai (~1 semaine), "
             "aucun avertissement, tarifs et Discord maîtrisés.\n"
-            "**Confirmé → Senior** : 8 500 $ + 8,5 h, régularité sur 2 semaines, "
+            f"**Confirmé → Senior** : {money_hours('confirme')}, régularité sur 2 semaines, "
             "bons retours clients, parmi les actifs.\n"
-            "**Senior → Formateur & recruteur / Chef de service** : 15 000 $ + 15 h, "
+            f"**Senior → Formateur & recruteur / Chef de service** : {money_hours('senior')}, "
             "entretien interne et validation de la Direction.\n"
-            f"Quota {MIN_HOURS_FOR_PRIME:g} h/semaine : sinon avertissement ; "
+            f"Quota {rules.min_hours:g} h/semaine : sinon avertissement ; "
             "déjà averti = licenciement / démission."
         ),
         inline=False,
@@ -855,7 +977,13 @@ async def tarif(
     gros_bagages: app_commands.Range[int, 0, 20] = 0,
     reservation: bool = False,
 ) -> None:
-    total, lines = compute_fare(km, zone, attente_min, passagers_sup, gros_bagages, reservation)
+    if not await require_feature(interaction, "tarifs"):
+        return
+    cfg = gcfg(interaction.guild.id) if interaction.guild else GuildConfig({}, {})
+    total, lines = compute_fare(
+        km, zone, attente_min, passagers_sup, gros_bagages, reservation,
+        rates=cfg.zone_rates(), supplements=cfg.supplements(),
+    )
     await interaction.response.send_message(
         "🧮 **Tarif de la course**\n"
         + "\n".join(f"• {line}" for line in lines)
@@ -875,6 +1003,12 @@ async def handle_service(interaction: discord.Interaction, action: str) -> None:
     if not await require_guild(interaction):
         return
     assert interaction.guild
+    if not await require_feature(interaction, "pds"):
+        return
+    if action in ("break_start", "break_end") and not await require_feature(interaction, "pauses"):
+        return
+    limit_seconds = rules_for(interaction.guild.id).max_break_seconds
+    limit_minutes = limit_seconds // 60
     try:
         if action == "start":
             settings = STORE.get_settings(interaction.guild.id)
@@ -899,19 +1033,19 @@ async def handle_service(interaction: discord.Interaction, action: str) -> None:
         elif action == "end":
             result = STORE.end_service(interaction.guild.id, interaction.user.id)
             message = f"✅ Fin de service enregistrée à **{format_local_time(result['ended_at'])}**."
-            if result["open_break_seconds"] > MAX_BREAK_SECONDS:
-                message += "\n⚠️ La pause en cours dépassait la limite de 30 minutes."
+            if result["open_break_seconds"] > limit_seconds:
+                message += f"\n⚠️ La pause en cours dépassait la limite de {limit_minutes} minutes."
             log_message = f"{interaction.user.mention} a terminé son service."
         elif action == "break_start":
             at = STORE.start_break(interaction.guild.id, interaction.user.id)
-            message = f"⏸️ Pause commencée à **{format_local_time(at)}**. Maximum consécutif : 30 minutes."
+            message = f"⏸️ Pause commencée à **{format_local_time(at)}**. Maximum consécutif : {limit_minutes} minutes."
             log_message = f"{interaction.user.mention} a commencé une pause à {format_local_time(at)}."
         elif action == "break_end":
             seconds = STORE.end_break(interaction.guild.id, interaction.user.id)
             minutes = seconds // 60
             message = f"▶️ Pause terminée après **{minutes} min**."
-            if seconds > MAX_BREAK_SECONDS:
-                message += "\n⚠️ La limite de 30 minutes a été dépassée."
+            if seconds > limit_seconds:
+                message += f"\n⚠️ La limite de {limit_minutes} minutes a été dépassée."
             log_message = f"{interaction.user.mention} a terminé une pause de {minutes} min."
         else:
             await interaction.response.send_message("Action inconnue.", ephemeral=True)
@@ -961,6 +1095,7 @@ class PdsView(discord.ui.View):
 
 def pds_embed(guild_id: int) -> discord.Embed:
     """Panel PDS-FDS avec la liste en direct : 🟢 en service, 🟡 en pause."""
+    rules = rules_for(guild_id)
     active = STORE.active_services(guild_id)
     on_break = [row for row in active if row["break_started_at"]]
     on_duty = [row for row in active if not row["break_started_at"]]
@@ -980,8 +1115,8 @@ def pds_embed(guild_id: int) -> discord.Embed:
         description=(
             "Utilise les boutons ci-dessous pour journaliser ton service.\n"
             "🟢 **Prise de service** · 🔴 **Fin de service** · "
-            "⏸️ **Pause** (30 min max) · ▶️ **Reprise**\n"
-            f"Minimum **{MIN_HOURS_FOR_PRIME:g} h** par semaine."
+            f"⏸️ **Pause** ({rules.max_break_seconds // 60} min max) · ▶️ **Reprise**\n"
+            f"Minimum **{rules.min_hours:g} h** par semaine."
         ),
         color=discord.Color.gold(),
         timestamp=utc_now(),
@@ -1045,6 +1180,7 @@ TICKET_KINDS = {
     "recrutement": ("Candidature", "📋", discord.ButtonStyle.success),
     "support": ("Question / Support", "❓", discord.ButtonStyle.primary),
     "signalement": ("Signalement / Plainte", "🚨", discord.ButtonStyle.danger),
+    "partenariat": ("Partenariat", "🤝", discord.ButtonStyle.secondary),
 }
 
 
@@ -1066,6 +1202,12 @@ class TicketModal(discord.ui.Modal):
         guild = interaction.guild
         if guild is None or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("Utilise le panel sur le serveur.", ephemeral=True)
+            return
+        cfg = gcfg(guild.id)
+        if not cfg.enabled("tickets") or not cfg.enabled(f"ticket_{self.kind}"):
+            await interaction.response.send_message(
+                "⛔ Ce type de ticket est désactivé par la direction.", ephemeral=True
+            )
             return
         existing = STORE.open_ticket_for(guild.id, interaction.user.id)
         if existing:
@@ -1099,6 +1241,10 @@ class TicketModal(discord.ui.Modal):
             )
         slug = re.sub(r"[^a-z0-9-]", "", member.name.lower().replace(" ", "-")) or str(member.id)
         category = getattr(interaction.channel, "category", None)
+        configured = cfg.get(f"ticket_category_{self.kind}_id")
+        configured_channel = guild.get_channel(configured) if configured else None
+        if isinstance(configured_channel, discord.CategoryChannel):
+            category = configured_channel
         try:
             channel = await guild.create_text_channel(
                 f"{self.kind}-{slug}"[:90],
@@ -1134,9 +1280,11 @@ class TicketModal(discord.ui.Modal):
 
 
 class TicketPanelView(discord.ui.View):
-    def __init__(self) -> None:
+    def __init__(self, kinds: list[str] | None = None) -> None:
         super().__init__(timeout=None)
         for kind, (label, emoji, style) in TICKET_KINDS.items():
+            if kinds is not None and kind not in kinds:
+                continue
             button = discord.ui.Button(
                 label=label, emoji=emoji, style=style, custom_id=f"td:ticket:{kind}"
             )
@@ -1187,16 +1335,28 @@ class TicketCloseView(discord.ui.View):
             pass
 
 
-def ticket_embed() -> discord.Embed:
+TICKET_BLURBS = {
+    "recrutement": "📋 **Candidature** — rejoindre l'entreprise",
+    "support": "❓ **Question / Support** — règles, tarifs, véhicules, planning",
+    "signalement": "🚨 **Signalement / Plainte** — problème avec un membre ou un client",
+    "partenariat": "🤝 **Partenariat** — collaboration avec une autre entreprise",
+}
+
+
+def enabled_ticket_kinds(guild_id: int) -> list[str]:
+    cfg = gcfg(guild_id)
+    return [kind for kind in TICKET_KINDS if cfg.enabled(f"ticket_{kind}")]
+
+
+def ticket_embed(guild_id: int | None = None) -> discord.Embed:
+    kinds = enabled_ticket_kinds(guild_id) if guild_id else list(TICKET_KINDS)
     return discord.Embed(
         title="🎫 Taxi Downtown — Tickets",
         description=(
             "Clique sur le bouton correspondant à ta demande : un salon privé sera créé "
             "avec la direction.\n\n"
-            "📋 **Candidature** — rejoindre l'entreprise\n"
-            "❓ **Question / Support** — règles, tarifs, véhicules, planning\n"
-            "🚨 **Signalement / Plainte** — problème avec un membre ou un client\n\n"
-            "Un seul ticket ouvert à la fois."
+            + "\n".join(TICKET_BLURBS[kind] for kind in kinds)
+            + "\n\nUn seul ticket ouvert à la fois."
         ),
         color=discord.Color.gold(),
     )
@@ -1207,99 +1367,57 @@ def ticket_embed() -> discord.Embed:
 # --------------------------------------------------------------------------- #
 
 
-def config_embed(guild: discord.Guild) -> discord.Embed:
-    settings = STORE.get_settings(guild.id)
-
-    def role(key: str, fallback: str) -> str:
-        return f"<@&{settings[key]}>" if settings[key] else fallback
-
-    def channel(key: str) -> str:
-        return f"<#{settings[key]}>" if settings[key] else "non configuré"
-
-    embed = discord.Embed(title="⚙️ Configuration Taxi Downtown", color=discord.Color.gold())
-    embed.add_field(
-        name="Direction", value=role("direction_role_id", "Administrateurs uniquement")
-    )
-    embed.add_field(name="Chauffeurs", value=role("driver_role_id", "non configuré"))
-    embed.add_field(name="Salon des journaux", value=channel("log_channel_id"))
-    embed.add_field(name="Salon webhook in-game", value=channel("webhook_channel_id"))
-    embed.set_footer(
-        text="Sélectionne dans les menus pour modifier. Les boutons publient un panel dans ce salon."
-    )
-    return embed
-
-
-class ConfigView(discord.ui.View):
-    def __init__(self) -> None:
-        super().__init__(timeout=900)
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if is_admin(interaction):
-            return True
+async def _publish_panel(
+    interaction: discord.Interaction, module_key: str, build: Any, *, pds: bool = False
+) -> None:
+    """Publie un panel dans le salon courant (bouton du module dans /config)."""
+    guild = interaction.guild
+    if guild is None:
+        return
+    if not gcfg(guild.id).enabled(module_key):
         await interaction.response.send_message(
-            "Seuls les administrateurs peuvent configurer le bot.", ephemeral=True
+            "Active d'abord ce module avant de publier son panel.", ephemeral=True
         )
-        return False
-
-    async def _save(self, interaction: discord.Interaction, **values: int) -> None:
-        assert interaction.guild
-        STORE.set_settings(interaction.guild.id, **values)
-        await interaction.response.edit_message(embed=config_embed(interaction.guild), view=self)
-
-    @discord.ui.select(
-        cls=discord.ui.RoleSelect, placeholder="Rôle Direction", row=0, min_values=1, max_values=1
-    )
-    async def pick_direction(self, interaction: discord.Interaction, select: discord.ui.RoleSelect) -> None:
-        await self._save(interaction, direction_role_id=select.values[0].id)
-
-    @discord.ui.select(
-        cls=discord.ui.RoleSelect, placeholder="Rôle Chauffeur", row=1, min_values=1, max_values=1
-    )
-    async def pick_driver(self, interaction: discord.Interaction, select: discord.ui.RoleSelect) -> None:
-        await self._save(interaction, driver_role_id=select.values[0].id)
-
-    @discord.ui.select(
-        cls=discord.ui.ChannelSelect, placeholder="Salon des journaux", row=2,
-        channel_types=[discord.ChannelType.text], min_values=1, max_values=1,
-    )
-    async def pick_logs(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect) -> None:
-        await self._save(interaction, log_channel_id=select.values[0].id)
-
-    @discord.ui.select(
-        cls=discord.ui.ChannelSelect, placeholder="Salon webhook in-game", row=3,
-        channel_types=[discord.ChannelType.text], min_values=1, max_values=1,
-    )
-    async def pick_webhook(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect) -> None:
-        await self._save(interaction, webhook_channel_id=select.values[0].id)
-
-    async def _publish(
-        self, interaction: discord.Interaction, embed: discord.Embed, view: discord.ui.View,
-        *, pds: bool = False,
-    ) -> None:
-        channel = interaction.channel
-        try:
-            message = await channel.send(embed=embed, view=view)  # type: ignore[union-attr]
-        except (discord.Forbidden, discord.HTTPException, AttributeError):
-            await interaction.response.send_message(
-                "Je ne peux pas écrire dans ce salon : vérifie mes permissions.", ephemeral=True
-            )
-            return
-        if pds and interaction.guild:
-            STORE.set_pds_panel(interaction.guild.id, message.channel.id, message.id)
-        await interaction.response.send_message("✅ Panel publié dans ce salon.", ephemeral=True)
-
-    @discord.ui.button(label="Publier PDS-FDS", emoji="🚖", style=discord.ButtonStyle.success, row=4)
-    async def publish_pds(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        await self._publish(
-            interaction, pds_embed(interaction.guild.id), PdsView(), pds=True  # type: ignore[union-attr]
+        return
+    embed, view = build(guild.id)
+    try:
+        message = await interaction.channel.send(embed=embed, view=view)  # type: ignore[union-attr]
+    except (discord.Forbidden, discord.HTTPException, AttributeError):
+        await interaction.response.send_message(
+            "Je ne peux pas écrire dans ce salon : vérifie mes permissions.", ephemeral=True
         )
+        return
+    if pds:
+        STORE.set_pds_panel(guild.id, message.channel.id, message.id)
+    await interaction.response.send_message(
+        f"✅ Panel publié dans {message.channel.mention}"
+        + (" — l'ancien panel PDS-FDS n'est plus actualisé." if pds else "."),
+        ephemeral=True,
+    )
 
-    @discord.ui.button(label="Publier Tickets", emoji="🎫", style=discord.ButtonStyle.primary, row=4)
-    async def publish_tickets(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        await self._publish(interaction, ticket_embed(), TicketPanelView())
+
+async def _publish_pds(interaction: discord.Interaction) -> None:
+    await _publish_panel(
+        interaction, "pds", lambda gid: (pds_embed(gid), PdsView()), pds=True
+    )
 
 
-@bot.tree.command(name="config", description="Panel de configuration (administrateurs)")
+async def _publish_tickets(interaction: discord.Interaction) -> None:
+    await _publish_panel(
+        interaction,
+        "tickets",
+        lambda gid: (ticket_embed(gid), TicketPanelView(enabled_ticket_kinds(gid))),
+    )
+
+
+config_ui.setup(
+    STORE,
+    {"publish_pds": _publish_pds, "publish_tickets": _publish_tickets},
+    lambda guild, title, description: log_event(guild, title, description),
+)
+
+
+@bot.tree.command(name="config", description="Tableau de bord de configuration (administrateurs)")
 async def config(interaction: discord.Interaction) -> None:
     if not await require_guild(interaction):
         return
@@ -1310,7 +1428,7 @@ async def config(interaction: discord.Interaction) -> None:
         return
     assert interaction.guild
     await interaction.response.send_message(
-        embed=config_embed(interaction.guild), view=ConfigView(), ephemeral=True
+        view=config_ui.home_view(interaction.guild), ephemeral=True
     )
 
 
@@ -1321,6 +1439,8 @@ async def course(
     montant: app_commands.Range[int, 1, 100_000],
 ) -> None:
     if not await require_guild(interaction):
+        return
+    if not await require_feature(interaction, "course"):
         return
     assert interaction.guild
     state = STORE.service_state(interaction.guild.id, interaction.user.id)
@@ -1370,7 +1490,7 @@ async def mystats(
     await send_private_text(
         interaction,
         f"📊 **{profile_text(target.display_name)} — semaine depuis le {format_local_time(start)}**\n"
-        f"État : {current}\n" + "\n".join(weekly_lines(stats, target.id)),
+        f"État : {current}\n" + "\n".join(weekly_lines(stats, target.id, rules_for(interaction.guild.id))),
     )
 
 
@@ -1378,9 +1498,12 @@ async def mystats(
 async def leaderboard(interaction: discord.Interaction) -> None:
     if not await require_guild(interaction):
         return
+    if not await require_feature(interaction, "primes"):
+        return
     assert interaction.guild
     _start, _end, stats = weekly_totals(interaction.guild.id)
-    eligible, others = prime_ranking(stats)
+    rules = rules_for(interaction.guild.id)
+    eligible, others = prime_ranking(stats, rules)
     if not eligible and not others:
         await interaction.response.send_message(
             "Aucune heure n'a encore été enregistrée cette semaine.", ephemeral=True
@@ -1390,7 +1513,7 @@ async def leaderboard(interaction: discord.Interaction) -> None:
     rows = []
     for index, (user_id, hours) in enumerate(eligible[:10]):
         data = stats[user_id]
-        prime = WEEKLY_PRIMES[index] if index < len(WEEKLY_PRIMES) else 0
+        prime = rules.primes[index] if index < len(rules.primes) else 0
         badge = medals[index] if index < len(medals) else f"**{index + 1}.**"
         rows.append(
             f"{badge} {profile_text(member_name(interaction.guild, user_id))} — "
@@ -1398,7 +1521,7 @@ async def leaderboard(interaction: discord.Interaction) -> None:
             f"{format_duration(hours)}" + (f" → **{format_money(prime)}**" if prime else "")
         )
     if others:
-        rows.append(f"\n⏳ **Sous les {MIN_HOURS_FOR_PRIME:g} h requises**")
+        rows.append(f"\n⏳ **Sous les {rules.min_hours:g} h requises**")
         rows.extend(
             f"• {profile_text(member_name(interaction.guild, user_id))} — {format_duration(hours)}"
             for user_id, hours in others[:10]
@@ -1415,6 +1538,7 @@ async def activite(interaction: discord.Interaction) -> None:
         return
     assert interaction.guild
     _start, _end, stats = weekly_totals(interaction.guild.id)
+    rules = rules_for(interaction.guild.id)
     ids = employee_ids(interaction.guild, stats)
     if not ids:
         await interaction.response.send_message(
@@ -1425,13 +1549,13 @@ async def activite(interaction: discord.Interaction) -> None:
         ((uid, stats.get(uid, EMPTY_STATS)["hours"]) for uid in ids),
         key=lambda item: item[1],
     )
-    below = [item for item in below if item[1] < MIN_HOURS_FOR_PRIME]
+    below = [item for item in below if item[1] < rules.min_hours]
     recent = STORE.weekly_stats(
         interaction.guild.id, utc_now() - timedelta(days=7), utc_now()
     )
     inactive = sorted(uid for uid in ids if recent.get(uid, EMPTY_STATS)["hours"] <= 0)
     sections = [
-        f"**Sous {MIN_HOURS_FOR_PRIME:g} h cette semaine ({len(below)})**",
+        f"**Sous {rules.min_hours:g} h cette semaine ({len(below)})**",
         *(
             f"• {profile_text(member_name(interaction.guild, uid))} — {format_duration(hours)}"
             for uid, hours in below[:40]
@@ -1485,6 +1609,8 @@ async def addvh(
 ) -> None:
     if not await require_staff(interaction):
         return
+    if not await require_feature(interaction, "fleet"):
+        return
     assert interaction.guild
     plate = plaque.strip().upper()
     try:
@@ -1511,6 +1637,8 @@ async def delvh(
     interaction: discord.Interaction, plaque: app_commands.Range[str, 1, 20]
 ) -> None:
     if not await require_staff(interaction):
+        return
+    if not await require_feature(interaction, "fleet"):
         return
     assert interaction.guild
     vehicle = STORE.delete_vehicle(interaction.guild.id, plaque.strip().upper())
@@ -1541,6 +1669,8 @@ async def assignvh(
 ) -> None:
     if not await require_staff(interaction):
         return
+    if not await require_feature(interaction, "fleet"):
+        return
     assert interaction.guild
     vehicle = STORE.assign_vehicle(
         interaction.guild.id, plaque.strip().upper(), chauffeur.id if chauffeur else None
@@ -1567,6 +1697,8 @@ async def checkvh(
     plaque: app_commands.Range[str, 1, 20] | None = None,
 ) -> None:
     if not await require_guild(interaction):
+        return
+    if not await require_feature(interaction, "fleet"):
         return
     assert interaction.guild
     if plaque is None:
@@ -1596,6 +1728,8 @@ async def checkvh(
 @bot.tree.command(name="myvh", description="Afficher les véhicules qui te sont attribués")
 async def myvh(interaction: discord.Interaction) -> None:
     if not await require_guild(interaction):
+        return
+    if not await require_feature(interaction, "fleet"):
         return
     assert interaction.guild
     rows = STORE.vehicles_for_user(interaction.guild.id, interaction.user.id)
@@ -1630,6 +1764,8 @@ async def recruter(
     decision: str,
 ) -> None:
     if not await require_staff(interaction):
+        return
+    if not await require_feature(interaction, "recruit"):
         return
     assert interaction.guild
     if membre.bot:
@@ -1685,6 +1821,8 @@ async def averto(
 ) -> None:
     if not await require_staff(interaction):
         return
+    if not await require_feature(interaction, "warnings"):
+        return
     assert interaction.guild
     warning_id = STORE.add_warning(
         interaction.guild.id, membre.id, motif.strip(), interaction.user.id
@@ -1712,6 +1850,8 @@ async def delaverto(
     id_avertissement: int | None = None,
 ) -> None:
     if not await require_staff(interaction):
+        return
+    if not await require_feature(interaction, "warnings"):
         return
     assert interaction.guild
     row = STORE.remove_warning(
@@ -1741,6 +1881,8 @@ async def kickj(
     motif: app_commands.Range[str, 3, 300],
 ) -> None:
     if not await require_staff(interaction):
+        return
+    if not await require_feature(interaction, "recruit"):
         return
     assert interaction.guild
     settings = STORE.get_settings(interaction.guild.id)
@@ -1801,6 +1943,8 @@ async def payerprime(
 ) -> None:
     if not await require_staff(interaction):
         return
+    if not await require_feature(interaction, "primes"):
+        return
     assert interaction.guild
     
     STORE.record_payout(interaction.guild.id, membre.id, float(montant), raison)
@@ -1833,6 +1977,8 @@ async def horaire(
     planning: app_commands.Range[str, 1, 1500] | None = None,
 ) -> None:
     if not await require_guild(interaction):
+        return
+    if not await require_feature(interaction, "schedule"):
         return
     assert interaction.guild
     target = membre or interaction.user
@@ -1881,10 +2027,18 @@ async def ouvert(interaction: discord.Interaction):
     # Réservé à la direction (ou aux chauffeurs selon votre choix, ici require_staff)
     if not await require_staff(interaction):
         return
+    if not await require_feature(interaction, "announce"):
+        return
     assert interaction.guild
     
     # Recherche du rôle Citoyen pour faire un vrai ping
-    citoyen_role = discord.utils.get(interaction.guild.roles, name="Citoyen")
+    announce_cfg = gcfg(interaction.guild.id)
+    role_id = announce_cfg.get("announce_role")
+    citoyen_role = (
+        interaction.guild.get_role(role_id)
+        if role_id
+        else discord.utils.get(interaction.guild.roles, name="Citoyen")
+    )
     ping = citoyen_role.mention if citoyen_role else "@Citoyen"
     
     embed = discord.Embed(
@@ -1893,7 +2047,7 @@ async def ouvert(interaction: discord.Interaction):
         color=discord.Color.green(),
         timestamp=utc_now()
     )
-    embed.set_image(url=IMAGE_OUVERT)
+    embed.set_image(url=announce_cfg.get("announce_image_open") or IMAGE_OUVERT)
     embed.set_footer(text="Taxi Downtown - Toujours à votre service")
     
     await interaction.response.send_message(
@@ -1914,10 +2068,18 @@ async def fermer(interaction: discord.Interaction):
     # Réservé à la direction
     if not await require_staff(interaction):
         return
+    if not await require_feature(interaction, "announce"):
+        return
     assert interaction.guild
     
     # Recherche du rôle Citoyen pour faire un vrai ping
-    citoyen_role = discord.utils.get(interaction.guild.roles, name="Citoyen")
+    announce_cfg = gcfg(interaction.guild.id)
+    role_id = announce_cfg.get("announce_role")
+    citoyen_role = (
+        interaction.guild.get_role(role_id)
+        if role_id
+        else discord.utils.get(interaction.guild.roles, name="Citoyen")
+    )
     ping = citoyen_role.mention if citoyen_role else "@Citoyen"
     
     embed = discord.Embed(
@@ -1926,7 +2088,7 @@ async def fermer(interaction: discord.Interaction):
         color=discord.Color.red(),
         timestamp=utc_now()
     )
-    embed.set_image(url=IMAGE_FERMER)
+    embed.set_image(url=announce_cfg.get("announce_image_close") or IMAGE_FERMER)
     embed.set_footer(text="Taxi Downtown - À bientôt")
     
     await interaction.response.send_message(
