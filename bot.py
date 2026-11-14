@@ -1176,12 +1176,26 @@ def request_pds_refresh(guild: discord.Guild) -> None:
 # Tickets
 # --------------------------------------------------------------------------- #
 
-RECRUIT_QUESTIONS = [
-    ("Pseudo RP et âge", "Prénom Nom RP — âge IRL", 100, False),
-    ("Expérience (taxi / conduite / autres métiers)", "Tes expériences sur Sensity ou ailleurs.", 500, True),
-    ("Disponibilités (jours et horaires)", "Combien d'heures par semaine peux-tu faire ?", 300, True),
-    ("Motivations", "Pourquoi rejoindre Taxi Downtown ?", 800, True),
+# Discord limite un formulaire à 5 champs : la candidature se fait en 2 étapes.
+RECRUIT_STEP1 = [
+    ("[HRP] Âge", "Ton âge IRL", 3, False),
+    ("[RP] Prénom / Nom", "Prénom Nom de ton personnage", 80, False),
+    ("[RP] Id (personnage)", "Ton ID personnage", 20, False),
+    ("[RP] Numéro de téléphone", "Ex : 555-0123", 30, False),
+    ("[RP] Permis", "Permis que tu possèdes (voiture, moto, ...)", 100, False),
 ]
+RECRUIT_STEP2 = [
+    ("Qualités (minimum 3)", "Une qualité par ligne", 300, True),
+    ("Défauts (minimum 2)", "Un défaut par ligne", 300, True),
+    ("Motivation", "Pourquoi Taxi Downtown ?", 800, True),
+    ("Disponibilités", "Jours et horaires, heures par semaine", 300, True),
+    ("Groupe illégal ou seconde entreprise ?", "Oui / Non + précisions", 200, False),
+]
+
+
+def count_items(text: str) -> int:
+    return len([part for part in re.split(r"[\n,;]+", text) if part.strip()])
+
 
 TICKET_KINDS = {
     "recrutement": ("Candidature", "📋", discord.ButtonStyle.success),
@@ -1192,12 +1206,13 @@ TICKET_KINDS = {
 
 
 class TicketModal(discord.ui.Modal):
-    def __init__(self, kind: str) -> None:
+    def __init__(self, kind: str, specs: list | None = None, pre: str = "") -> None:
         label = TICKET_KINDS[kind][0]
         super().__init__(title=f"Ticket — {label}"[:45])
         self.kind = kind
         self.inputs: list[discord.ui.TextInput] = []
-        specs = RECRUIT_QUESTIONS if kind == "recrutement" else [
+        self.pre = pre
+        specs = specs or [
             ("Sujet / motif", "Explique ta demande en quelques lignes.", 500, True)
         ]
         for question, placeholder, limit, paragraph in specs:
@@ -1215,7 +1230,8 @@ class TicketModal(discord.ui.Modal):
     def subject_text(self) -> str:
         if self.kind != "recrutement":
             return self.inputs[0].value.strip()
-        return "\n".join(f"**{i.label}**\n{i.value.strip()}" for i in self.inputs)
+        body = "\n".join(f"**{i.label}** : {i.value.strip()}" for i in self.inputs)
+        return f"{self.pre}\n{body}" if self.pre else body
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         guild = interaction.guild
@@ -1223,7 +1239,16 @@ class TicketModal(discord.ui.Modal):
             await interaction.response.send_message("Utilise le panel sur le serveur.", ephemeral=True)
             return
         cfg = gcfg(guild.id)
-        if not cfg.enabled("tickets") or not cfg.enabled(f"ticket_{self.kind}"):
+        if self.kind == "recrutement":
+            if count_items(self.inputs[0].value) < 3 or count_items(self.inputs[1].value) < 2:
+                await interaction.response.send_message(
+                    "⚠️ Indique au moins **3 qualités** et **2 défauts** (un par ligne), "
+                    "puis clique de nouveau sur « Continuer ».",
+                    ephemeral=True,
+                )
+                return
+        general_ok = self.kind == "recrutement" or cfg.enabled("tickets")
+        if not general_ok or not cfg.enabled(f"ticket_{self.kind}"):
             await interaction.response.send_message(
                 "⛔ Ce type de ticket est désactivé par la direction.", ephemeral=True
             )
@@ -1370,6 +1395,36 @@ def enabled_ticket_kinds(guild_id: int) -> list[str]:
     ]
 
 
+class RecruitStep1Modal(discord.ui.Modal):
+    def __init__(self) -> None:
+        super().__init__(title="Candidature — 1/2 (HRP / RP)")
+        self.inputs: list[discord.ui.TextInput] = []
+        for label, placeholder, limit, _para in RECRUIT_STEP1:
+            item = discord.ui.TextInput(label=label, placeholder=placeholder, max_length=limit, min_length=1)
+            self.inputs.append(item)
+            self.add_item(item)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        pre = "\n".join(f"**{i.label}** : {i.value.strip()}" for i in self.inputs)
+        await interaction.response.send_message(
+            "✅ Étape 1/2 enregistrée. Clique sur **Continuer** pour la suite.",
+            view=RecruitContinueView(pre),
+            ephemeral=True,
+        )
+
+
+class RecruitContinueView(discord.ui.View):
+    def __init__(self, pre: str) -> None:
+        super().__init__(timeout=900)
+        self.pre = pre
+
+    @discord.ui.button(label="Continuer (2/2)", emoji="➡️", style=discord.ButtonStyle.success)
+    async def go(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        modal = TicketModal("recrutement", RECRUIT_STEP2, self.pre)
+        modal.title = "Candidature — 2/2"
+        await interaction.response.send_modal(modal)
+
+
 class RecruitmentPanelView(discord.ui.View):
     def __init__(self) -> None:
         super().__init__(timeout=None)
@@ -1379,31 +1434,44 @@ class RecruitmentPanelView(discord.ui.View):
         custom_id="td:ticket:recrutement",
     )
     async def apply(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        await interaction.response.send_modal(TicketModal("recrutement"))
+        cfg = gcfg(interaction.guild_id) if interaction.guild_id else None
+        if cfg is not None and not cfg.enabled("ticket_recrutement"):
+            await interaction.response.send_message(
+                "⛔ Les candidatures sont fermées pour le moment.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(RecruitStep1Modal())
 
 
 def recruitment_embed(guild_id: int | None = None) -> discord.Embed:
     embed = discord.Embed(
-        title="Formulaire de candidature – Taxi Downtown",
+        title="🚨 TAXI DOWNTOWN RECRUTE : MARRE DE ROULER DANS LE VIDE ? REJOINS L'ÉLITE ! 🚨",
         description=(
-            "Vous souhaitez rejoindre l'équipe de Taxi Downtown et participer activement à la vie "
-            "de l'entreprise ? Nous recrutons de nouveaux chauffeurs pour renforcer nos rangs.\n\n"
-            "Nous recherchons avant tout des personnes sérieuses, motivées et respectueuses. Que "
-            "vous soyez un joueur expérimenté ou plus récent sur le serveur, votre ancienneté n'est "
-            "pas le seul critère : nous accordons une grande importance à votre implication, votre "
-            "capacité à communiquer et votre envie d'aider les autres.\n\n"
-            "Nous sommes ouverts à tous les profils :\n"
-            "• Transport de clients en ville, hors ville et à Cayo.\n"
-            "• Courses médicales et prises en charge spécifiques.\n"
-            "• Accueil et accompagnement des nouveaux chauffeurs.\n"
-            "• Participation à la vie de l'entreprise et retours sur son fonctionnement.\n"
-            "• Toute autre compétence pouvant contribuer au développement de l'entreprise.\n\n"
-            "Aucune expérience n'est obligatoire. Si vous êtes motivé et prêt à apprendre, nous "
-            "vous accompagnerons dans votre intégration.\n\n"
-            "Si vous souhaitez rejoindre l'équipe, cliquez sur le bouton ci-dessous pour remplir le "
-            "formulaire de candidature. Chaque candidature sera étudiée avec attention.\n\n"
-            "Nous vous remercions de l'intérêt que vous portez à Taxi Downtown sur Sensity Life RP "
-            "et avons hâte de découvrir votre profil."
+            "`Tu connais la carte par cœur et tu en as marre des boîtes désorganisées ?` 🚕💨\n\n"
+            "## 🎯 LE PROFIL DU CHAUFFEUR PARFAIT 💯\n"
+            "😎 **Sang-froid :** tu sais esquiver les chauffards du centre-ville sans renverser "
+            "le café du client.\n"
+            "🗺️ **GPS dans la tête :** les raccourcis de Sandy Shores à Cayo Perico n'ont aucun "
+            "secret pour toi.\n"
+            "💼 **Esprit business :** tu es là pour aligner les kilomètres et exploser les "
+            "compteurs de banque !\n\n"
+            "## 🔥 POURQUOI VENIR CHEZ NOUS ?\n"
+            "💵 **Salaire horaire fixe :** **250 $/h garantis dès le 1er jour** pendant ton service !\n"
+            "💸 **Rentabilité maximale :** enchaîne les missions PNJ et monte jusqu'à "
+            "**20 000 $ à 25 000 $ / heure** !\n"
+            "📈 **Commission de choc :** **40 % direct dans ta poche** dès la 1ère course + "
+            "**primes jusqu'à 55 000 $ / semaine** !\n"
+            "🍔 **Buffet illimité :** burgers & boissons **100 % gratos** pendant ton service.\n"
+            "🏪 **Vente à bord :** vends nos menus aux passagers ! (**200 $** civils — "
+            "**150 $** nouveaux arrivants)\n"
+            "🚘 **Flotte VIP 24/7 :** des berlines récentes prêtes à tourner à toute heure.\n"
+            "🏆 **Évolution éclair :** monte rapidement **Chauffeur Confirmé** puis **Senior** "
+            "selon tes stats.\n\n"
+            "## 📑 PRÊT À PRENDRE LE VOLANT ?\n"
+            "Laisse ton ancien boulot au garage et viens passer ton entretien !\n"
+            "👉 Clique sur **Postuler maintenant** et remplis le formulaire en 2 étapes. "
+            "Chaque candidature est étudiée avec attention.\n\n"
+            "🚕 **Taxi Downtown — Bonne route à tous à nos côtés !**"
         ),
         color=discord.Color.gold(),
     )
