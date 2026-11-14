@@ -395,7 +395,7 @@ class TaxiBot(commands.Bot):
         await self.start_webhook_server()
         self.interrupted_services = STORE.recover_interrupted_services()
         self.heartbeat_task = asyncio.create_task(self.heartbeat_loop())
-        for view in (PdsView(), TicketPanelView(), TicketCloseView()):
+        for view in (PdsView(), TicketPanelView(), RecruitmentPanelView(), TicketCloseView()):
             self.add_view(view)
         synced = await self.tree.sync()
         print(f"{len(synced)} commandes slash synchronisées.")
@@ -1176,6 +1176,13 @@ def request_pds_refresh(guild: discord.Guild) -> None:
 # Tickets
 # --------------------------------------------------------------------------- #
 
+RECRUIT_QUESTIONS = [
+    ("Pseudo RP et âge", "Prénom Nom RP — âge IRL", 100, False),
+    ("Expérience (taxi / conduite / autres métiers)", "Tes expériences sur Sensity ou ailleurs.", 500, True),
+    ("Disponibilités (jours et horaires)", "Combien d'heures par semaine peux-tu faire ?", 300, True),
+    ("Motivations", "Pourquoi rejoindre Taxi Downtown ?", 800, True),
+]
+
 TICKET_KINDS = {
     "recrutement": ("Candidature", "📋", discord.ButtonStyle.success),
     "support": ("Question / Support", "❓", discord.ButtonStyle.primary),
@@ -1189,14 +1196,26 @@ class TicketModal(discord.ui.Modal):
         label = TICKET_KINDS[kind][0]
         super().__init__(title=f"Ticket — {label}"[:45])
         self.kind = kind
-        self.subject = discord.ui.TextInput(
-            label="Sujet / motif",
-            style=discord.TextStyle.paragraph,
-            min_length=3,
-            max_length=500,
-            placeholder="Explique ta demande en quelques lignes.",
-        )
-        self.add_item(self.subject)
+        self.inputs: list[discord.ui.TextInput] = []
+        specs = RECRUIT_QUESTIONS if kind == "recrutement" else [
+            ("Sujet / motif", "Explique ta demande en quelques lignes.", 500, True)
+        ]
+        for question, placeholder, limit, paragraph in specs:
+            item = discord.ui.TextInput(
+                label=question,
+                style=discord.TextStyle.paragraph if paragraph else discord.TextStyle.short,
+                min_length=2,
+                max_length=limit,
+                placeholder=placeholder,
+            )
+            self.inputs.append(item)
+            self.add_item(item)
+
+    @property
+    def subject_text(self) -> str:
+        if self.kind != "recrutement":
+            return self.inputs[0].value.strip()
+        return "\n".join(f"**{i.label}**\n{i.value.strip()}" for i in self.inputs)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         guild = interaction.guild
@@ -1259,10 +1278,10 @@ class TicketModal(discord.ui.Modal):
                 ephemeral=True,
             )
             return
-        STORE.create_ticket(guild.id, member.id, channel.id, self.kind, self.subject.value.strip())
+        STORE.create_ticket(guild.id, member.id, channel.id, self.kind, self.subject_text)
         embed = discord.Embed(
             title=f"{emoji} Ticket — {label}",
-            description=discord.utils.escape_mentions(self.subject.value.strip()),
+            description=discord.utils.escape_mentions(self.subject_text)[:4000],
             color=discord.Color.gold(),
             timestamp=utc_now(),
         )
@@ -1283,7 +1302,7 @@ class TicketPanelView(discord.ui.View):
     def __init__(self, kinds: list[str] | None = None) -> None:
         super().__init__(timeout=None)
         for kind, (label, emoji, style) in TICKET_KINDS.items():
-            if kinds is not None and kind not in kinds:
+            if kind == "recrutement" or (kinds is not None and kind not in kinds):
                 continue
             button = discord.ui.Button(
                 label=label, emoji=emoji, style=style, custom_id=f"td:ticket:{kind}"
@@ -1345,11 +1364,57 @@ TICKET_BLURBS = {
 
 def enabled_ticket_kinds(guild_id: int) -> list[str]:
     cfg = gcfg(guild_id)
-    return [kind for kind in TICKET_KINDS if cfg.enabled(f"ticket_{kind}")]
+    return [
+        kind for kind in TICKET_KINDS
+        if kind != "recrutement" and cfg.enabled(f"ticket_{kind}")
+    ]
+
+
+class RecruitmentPanelView(discord.ui.View):
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Postuler maintenant", emoji="📝", style=discord.ButtonStyle.primary,
+        custom_id="td:ticket:recrutement",
+    )
+    async def apply(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(TicketModal("recrutement"))
+
+
+def recruitment_embed(guild_id: int | None = None) -> discord.Embed:
+    embed = discord.Embed(
+        title="Formulaire de candidature – Taxi Downtown",
+        description=(
+            "Vous souhaitez rejoindre l'équipe de Taxi Downtown et participer activement à la vie "
+            "de l'entreprise ? Nous recrutons de nouveaux chauffeurs pour renforcer nos rangs.\n\n"
+            "Nous recherchons avant tout des personnes sérieuses, motivées et respectueuses. Que "
+            "vous soyez un joueur expérimenté ou plus récent sur le serveur, votre ancienneté n'est "
+            "pas le seul critère : nous accordons une grande importance à votre implication, votre "
+            "capacité à communiquer et votre envie d'aider les autres.\n\n"
+            "Nous sommes ouverts à tous les profils :\n"
+            "• Transport de clients en ville, hors ville et à Cayo.\n"
+            "• Courses médicales et prises en charge spécifiques.\n"
+            "• Accueil et accompagnement des nouveaux chauffeurs.\n"
+            "• Participation à la vie de l'entreprise et retours sur son fonctionnement.\n"
+            "• Toute autre compétence pouvant contribuer au développement de l'entreprise.\n\n"
+            "Aucune expérience n'est obligatoire. Si vous êtes motivé et prêt à apprendre, nous "
+            "vous accompagnerons dans votre intégration.\n\n"
+            "Si vous souhaitez rejoindre l'équipe, cliquez sur le bouton ci-dessous pour remplir le "
+            "formulaire de candidature. Chaque candidature sera étudiée avec attention.\n\n"
+            "Nous vous remercions de l'intérêt que vous portez à Taxi Downtown sur Sensity Life RP "
+            "et avons hâte de découvrir votre profil."
+        ),
+        color=discord.Color.gold(),
+    )
+    image = gcfg(guild_id).get("recruit_image") if guild_id else ""
+    if image and str(image).startswith("http"):
+        embed.set_image(url=str(image))
+    return embed
 
 
 def ticket_embed(guild_id: int | None = None) -> discord.Embed:
-    kinds = enabled_ticket_kinds(guild_id) if guild_id else list(TICKET_KINDS)
+    kinds = enabled_ticket_kinds(guild_id) if guild_id else [k for k in TICKET_KINDS if k != "recrutement"]
     return discord.Embed(
         title="🎫 Taxi Downtown — Tickets",
         description=(
@@ -1410,9 +1475,21 @@ async def _publish_tickets(interaction: discord.Interaction) -> None:
     )
 
 
+async def _publish_recruitment(interaction: discord.Interaction) -> None:
+    await _publish_panel(
+        interaction,
+        "ticket_recrutement",
+        lambda gid: (recruitment_embed(gid), RecruitmentPanelView()),
+    )
+
+
 config_ui.setup(
     STORE,
-    {"publish_pds": _publish_pds, "publish_tickets": _publish_tickets},
+    {
+        "publish_pds": _publish_pds,
+        "publish_tickets": _publish_tickets,
+        "publish_recruitment": _publish_recruitment,
+    },
     lambda guild, title, description: log_event(guild, title, description),
 )
 

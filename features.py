@@ -199,17 +199,39 @@ CATEGORIES: tuple[Category, ...] = (
         "tickets",
         "Tickets",
         "🎫",
-        "Panel, candidature, support, signalement, partenariat",
+        "Panel général : support, signalement, partenariat",
         (
             Module(
                 "tickets", "Système de tickets", "🎫",
                 "Active tous les tickets. Publie le panel avec ses boutons.",
                 actions=(("publish_tickets", "Publier le panel ici"),),
             ),
-            _ticket_module("recrutement", "Candidature", "📋", "Ticket de candidature."),
             _ticket_module("support", "Question / Support", "❓", "Ticket de support."),
             _ticket_module("signalement", "Signalement / Plainte", "🚨", "Ticket de signalement."),
             _ticket_module("partenariat", "Partenariat", "🤝", "Ticket de partenariat."),
+        ),
+    ),
+    Category(
+        "recruitment",
+        "Recrutement",
+        "📋",
+        "Panel de candidature séparé, formulaire et salon dédié",
+        (
+            Module(
+                "ticket_recrutement", "Candidature Taxi Downtown", "📋",
+                "Panel dédié avec bouton « Postuler maintenant » et formulaire de candidature.",
+                fields=(
+                    Field(
+                        "ticket_category_recrutement_id",
+                        "Catégorie Discord des candidatures",
+                        "category",
+                        DEFAULT_TICKET_CATEGORIES["recrutement"],
+                        store=SETTINGS_STORE,
+                    ),
+                    Field("recruit_image", "Image du panel (URL, optionnel)", "text", ""),
+                ),
+                actions=(("publish_recruitment", "Publier le panel ici"),),
+            ),
         ),
     ),
     Category(

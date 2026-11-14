@@ -31,7 +31,7 @@ class ConfigTests(unittest.IsolatedAsyncioTestCase):
     def test_registry_is_consistent(self):
         keys = [f.key for m in features.MODULES.values() for f in m.fields]
         self.assertEqual(len(keys), len(set(keys)), "clés de champ en double")
-        self.assertEqual(len(features.CATEGORIES), 7)
+        self.assertEqual(len(features.CATEGORIES), 8)
         for module in features.MODULES.values():
             texts = [f for f in module.fields if f.kind in ("int", "float", "text")]
             self.assertLessEqual(len(texts), 5, f"{module.key}: 5 champs max par formulaire")
@@ -184,7 +184,7 @@ class ConfigTests(unittest.IsolatedAsyncioTestCase):
         joined = "\n".join(texts)
         self.assertIn("Accès & Hiérarchie", joined)
         self.assertIn("/6`", joined)
-        self.assertEqual(sum(1 for t in texts if "·" in t and "/" in t), 7)
+        self.assertEqual(sum(1 for t in texts if "·" in t and "/" in t), 8)
 
     async def test_publish_requires_enabled_module(self):
         features.set_enabled(self.store, 1, "tickets", False)

@@ -6,7 +6,7 @@ Bot de gestion de l'entreprise de taxi Taxi Downtown : service, courses, primes 
 
 1. Secret Replit `DISCORD_TOKEN` (jamais dans le code).
 2. Permissions du bot : `applications.commands`, **Gérer les rôles** (recrutement), lecture/écriture dans le salon de journaux. Son rôle doit être au-dessus du rôle Chauffeur.
-3. Un administrateur lance `/config` : tableau de bord en 7 catégories (voir ci-dessous).
+3. Un administrateur lance `/config` : tableau de bord en 8 catégories (voir ci-dessous).
 4. Panels publics (boutons persistants, valables après redémarrage) :
    - **PDS-FDS** : Prise de service, Fin de service, Pause, Reprise (remplace `/service`). Le panel affiche en direct les employés en service (🟢) et en pause (🟡) ; il se met à jour à chaque action. Seul le dernier panel publié est actualisé.
    - **Tickets** : Candidature, Question / Support, Signalement / Plainte et Partenariat. Chaque type possède sa catégorie de destination (par défaut : RECRUTEMENT, DIRECTION, DIRECTION et PARTENARIAT). Les catégories Discord de chaque type se règlent dans `/config` → Tickets. Les nouveaux salons sont privés (demandeur + Direction) ; un seul ticket ouvert par membre. Le bot a besoin de **Gérer les salons**.

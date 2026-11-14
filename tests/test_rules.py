@@ -105,7 +105,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_persistent_views_have_unique_custom_ids(self):
         ids = []
-        for view in (self.bot.PdsView(), self.bot.TicketPanelView(), self.bot.TicketCloseView()):
+        for view in (self.bot.PdsView(), self.bot.TicketPanelView(), self.bot.RecruitmentPanelView(), self.bot.TicketCloseView()):
             self.assertIsNone(view.timeout)
             ids += [item.custom_id for item in view.children]
         self.assertEqual(len(ids), len(set(ids)))

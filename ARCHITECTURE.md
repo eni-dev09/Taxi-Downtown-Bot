@@ -58,7 +58,7 @@ Le schéma est créé et migré au démarrage (`initialize`) : les anciennes « 
 
 ## features.py — modèle de configuration
 
-- 7 catégories → 28 modules → 38 champs (types : rôle, salon, catégorie, entier, décimal, texte).
+- 8 catégories → 28 modules → 38 champs (types : rôle, salon, catégorie, entier, décimal, texte).
 - Chaque module a un interrupteur (sauf rôles et seuils), des champs, éventuellement des actions (publier un panel).
 - Valeurs : colonnes de `guild_settings` pour les anciens réglages, `module_config` pour le reste ; défauts = règles Taxi Downtown, donc rien ne change tant qu'on ne modifie rien.
 - État d'un module : `on` (actif et complet), `todo` (actif mais rôle/salon requis manquant), `off`.
