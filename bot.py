@@ -395,7 +395,8 @@ class TaxiBot(commands.Bot):
         await self.start_webhook_server()
         self.interrupted_services = STORE.recover_interrupted_services()
         self.heartbeat_task = asyncio.create_task(self.heartbeat_loop())
-        for view in (PdsView(), TicketPanelView(), RecruitmentPanelView(), TicketCloseView()):
+        for view in (PdsView(), TicketPanelView(), RecruitmentPanelView(), TicketCloseView(),
+                     RecruitDecisionView()):
             self.add_view(view)
         synced = await self.tree.sync()
         print(f"{len(synced)} commandes slash synchronisées.")
@@ -1317,6 +1318,8 @@ class TicketModal(discord.ui.Modal):
             view=TicketCloseView(),
             allowed_mentions=discord.AllowedMentions(users=[member], roles=True),
         )
+        if self.kind == "recrutement":
+            await channel.send("Décision de la direction :", view=RecruitDecisionView())
         await interaction.followup.send(f"🎫 Ticket créé : {channel.mention}", ephemeral=True)
         await log_event(
             guild, "🎫 Ticket ouvert", f"{member.mention} — {label} — {channel.mention}"
@@ -1341,6 +1344,51 @@ class TicketPanelView(discord.ui.View):
             await interaction.response.send_modal(TicketModal(kind))
 
         return callback
+
+
+class RecruitDecisionView(discord.ui.View):
+    """Boutons Accepter / Refuser dans le salon d'une candidature (direction)."""
+
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
+
+    async def _decide(self, interaction: discord.Interaction, accept: bool) -> None:
+        guild, channel = interaction.guild, interaction.channel
+        if guild is None or channel is None:
+            return
+        if not is_staff(interaction):
+            await interaction.response.send_message(
+                "Réservé à la direction.", ephemeral=True
+            )
+            return
+        ticket = STORE.ticket_by_channel(channel.id)
+        member = guild.get_member(ticket["user_id"]) if ticket else None
+        if ticket is None or ticket["kind"] != "recrutement" or member is None:
+            await interaction.response.send_message(
+                "Candidat introuvable (a-t-il quitté le serveur ?).", ephemeral=True
+            )
+            return
+        message = await apply_recruit_decision(interaction, member, accept)
+        for item in self.children:
+            item.disabled = True  # type: ignore[attr-defined]
+        await interaction.response.edit_message(view=self)
+        await channel.send(
+            message, allowed_mentions=discord.AllowedMentions(users=[member])
+        )
+
+    @discord.ui.button(
+        label="Accepter", emoji="✅", style=discord.ButtonStyle.success,
+        custom_id="td:recruit:accept",
+    )
+    async def accept(self, interaction: discord.Interaction, _b: discord.ui.Button) -> None:
+        await self._decide(interaction, True)
+
+    @discord.ui.button(
+        label="Refuser", emoji="❌", style=discord.ButtonStyle.danger,
+        custom_id="td:recruit:reject",
+    )
+    async def reject(self, interaction: discord.Interaction, _b: discord.ui.Button) -> None:
+        await self._decide(interaction, False)
 
 
 class TicketCloseView(discord.ui.View):
@@ -1892,33 +1940,12 @@ async def myvh(interaction: discord.Interaction) -> None:
 # --------------------------------------------------------------------------- #
 
 
-@bot.tree.command(name="recruter", description="Accepter ou refuser une candidature")
-@app_commands.describe(
-    membre="Candidat ou chauffeur concerné",
-    decision="Accepter pour l'intégrer ou refuser la candidature",
-)
-@app_commands.choices(
-    decision=[
-        app_commands.Choice(name="Accepter", value="accept"),
-        app_commands.Choice(name="Refuser", value="reject"),
-    ]
-)
-async def recruter(
-    interaction: discord.Interaction,
-    membre: discord.Member,
-    decision: str,
-) -> None:
-    if not await require_staff(interaction):
-        return
-    if not await require_feature(interaction, "recruit"):
-        return
+async def apply_recruit_decision(
+    interaction: discord.Interaction, membre: discord.Member, accept: bool
+) -> str:
+    """Accepte/refuse un candidat (rôles, statut, journal) et renvoie le message."""
     assert interaction.guild
-    if membre.bot:
-        await interaction.response.send_message(
-            "Une candidature doit concerner un membre humain.", ephemeral=True
-        )
-        return
-    if decision == "accept":
+    if accept:
         STORE.set_employee_status(interaction.guild.id, membre.id, "active")
         settings = STORE.get_settings(interaction.guild.id)
         roles_to_grant = [
@@ -1952,10 +1979,40 @@ async def recruter(
         STORE.set_employee_status(interaction.guild.id, membre.id, "rejected")
         message = f"❌ La candidature de {membre.mention} a été refusée."
         log_message = f"{interaction.user.mention} a refusé la candidature de {membre.mention}."
+    await log_event(interaction.guild, "📋 Décision de recrutement", log_message)
+    return message
+
+
+@bot.tree.command(name="recruter", description="Accepter ou refuser une candidature")
+@app_commands.describe(
+    membre="Candidat ou chauffeur concerné",
+    decision="Accepter pour l'intégrer ou refuser la candidature",
+)
+@app_commands.choices(
+    decision=[
+        app_commands.Choice(name="Accepter", value="accept"),
+        app_commands.Choice(name="Refuser", value="reject"),
+    ]
+)
+async def recruter(
+    interaction: discord.Interaction,
+    membre: discord.Member,
+    decision: str,
+) -> None:
+    if not await require_staff(interaction):
+        return
+    if not await require_feature(interaction, "recruit"):
+        return
+    assert interaction.guild
+    if membre.bot:
+        await interaction.response.send_message(
+            "Une candidature doit concerner un membre humain.", ephemeral=True
+        )
+        return
+    message = await apply_recruit_decision(interaction, membre, decision == "accept")
     await interaction.response.send_message(
         message, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
     )
-    await log_event(interaction.guild, "📋 Décision de recrutement", log_message)
 
 
 @bot.tree.command(name="averto", description="Ajouter un avertissement à un chauffeur")
